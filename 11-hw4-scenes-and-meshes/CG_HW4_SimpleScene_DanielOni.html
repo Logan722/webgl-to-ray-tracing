@@ -1,0 +1,700 @@
+<html>
+
+<!-- 
+    CG_HW4_SimpleScene_DanielOni.html
+    CS 7382 - Computer Graphics, Spring 2026
+
+    A walking stick-figure person with jointed arms and legs.
+    Uses basic 2D shapes (rectangles + circle) with instance transforms.
+    Joints: left arm (shoulder), right arm (shoulder), left leg (hip), right leg (hip)
+    The figure moves independently as a whole via X/Y translation sliders.
+-->
+
+<!-- VERTEX SHADER SOURCE CODE: Written in GLSL -->
+<script id="vertex-shader" type="x-shader/x-vertex">
+#version 300 es
+
+in vec4 aPosition;      // VERTEX (Point in homogeneous coordinates)
+
+uniform mat4 uModelMatrix;  // Combined modeling transformation for this body part
+
+void main()
+{
+    gl_Position = uModelMatrix * aPosition;
+    gl_PointSize = 5.0;
+}
+</script>
+
+<!-- FRAGMENT SHADER SOURCE CODE: Written in GLSL -->
+<script id="fragment-shader" type="x-shader/x-fragment">
+#version 300 es
+
+precision mediump float;
+
+uniform vec4 uColor;    // Per-part color set from CPU
+out vec4 fColor;
+
+void main()
+{
+    fColor = uColor;
+}
+</script>
+
+<body>
+<h3>HW4 SimpleScene - Walking Stick Figure (Daniel Oni)</h3>
+<canvas id="gl-canvas" width="512" height="512"> </canvas>
+
+<div>
+    <b>Move Figure:</b><br>
+    X Position <input id="sliderX" type="range" min="-0.8" max="0.8" step="0.01" value="0.0" />
+    <span id="valX">0.00</span>
+</div>
+<div>
+    Y Position <input id="sliderY" type="range" min="-0.8" max="0.8" step="0.01" value="-0.1" />
+    <span id="valY">-0.10</span>
+</div>
+<br>
+<div>
+    <b>Joint Controls:</b><br>
+    Left Arm (Shoulder) <input id="sliderLeftArm" type="range" min="-150" max="150" step="1" value="20" />
+    <span id="valLA">20&deg;</span>
+</div>
+<div>
+    Right Arm (Shoulder) <input id="sliderRightArm" type="range" min="-150" max="150" step="1" value="-20" />
+    <span id="valRA">-20&deg;</span>
+</div>
+<div>
+    Left Leg (Hip) <input id="sliderLeftLeg" type="range" min="-60" max="60" step="1" value="15" />
+    <span id="valLL">15&deg;</span>
+</div>
+<div>
+    Right Leg (Hip) <input id="sliderRightLeg" type="range" min="-60" max="60" step="1" value="-15" />
+    <span id="valRL">-15&deg;</span>
+</div>
+<br>
+<div>
+    <button id="btnWalk">Toggle Walk Animation</button>
+    <button id="btnReset">Reset Pose</button>
+</div>
+</body>
+
+
+<!-- Written in Javascript -->
+<script>
+
+////////////////////////////////////////////////////////////////////////////////
+// initShaders - compiles and links shaders (same pattern as class examples)
+////////////////////////////////////////////////////////////////////////////////
+function initShaders( gl, vertexShaderId, fragmentShaderId )
+{
+    var vertShdr;
+    var fragShdr;
+
+    var vertElem = document.getElementById( vertexShaderId );
+    if ( !vertElem ) {
+        alert( "Unable to load vertex shader " + vertexShaderId );
+        return -1;
+    }
+    else {
+        vertShdr = gl.createShader( gl.VERTEX_SHADER );
+        gl.shaderSource( vertShdr, vertElem.textContent.replace(/^\s+|\s+$/g, '' ));
+        gl.compileShader( vertShdr );
+        if ( !gl.getShaderParameter(vertShdr, gl.COMPILE_STATUS) ) {
+            var msg = "Vertex shader failed to compile.  The error log is:"
+                + "<pre>" + gl.getShaderInfoLog( vertShdr ) + "</pre>";
+            alert( msg );
+            return -1;
+        }
+    }
+
+    var fragElem = document.getElementById( fragmentShaderId );
+    if ( !fragElem ) {
+        alert( "Unable to load fragment shader " + fragmentShaderId );
+        return -1;
+    }
+    else {
+        fragShdr = gl.createShader( gl.FRAGMENT_SHADER );
+        gl.shaderSource( fragShdr, fragElem.textContent.replace(/^\s+|\s+$/g, '' ) );
+        gl.compileShader( fragShdr );
+        if ( !gl.getShaderParameter(fragShdr, gl.COMPILE_STATUS) ) {
+            var msg = "Fragment shader failed to compile.  The error log is:"
+                + "<pre>" + gl.getShaderInfoLog( fragShdr ) + "</pre>";
+            alert( msg );
+            return -1;
+        }
+    }
+
+    var program = gl.createProgram();
+    gl.attachShader( program, vertShdr );
+    gl.attachShader( program, fragShdr );
+    gl.linkProgram( program );
+
+    if ( !gl.getProgramParameter(program, gl.LINK_STATUS) ) {
+        var msg = "Shader program failed to link.  The error log is:"
+            + "<pre>" + gl.getProgramInfoLog( program ) + "</pre>";
+        alert( msg );
+        return -1;
+    }
+
+    return program;
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// 4x4 Matrix Helper Functions (column-major for WebGL)
+// These build transformation matrices on the CPU side so we can concatenate
+// them for the joint hierarchy, then send the result to the shader.
+////////////////////////////////////////////////////////////////////////////////
+
+function mat4_identity() {
+    return new Float32Array([
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1
+    ]);
+}
+
+function mat4_translate(tx, ty, tz) {
+    // Column-major translation matrix
+    return new Float32Array([
+        1,  0,  0,  0,
+        0,  1,  0,  0,
+        0,  0,  1,  0,
+        tx, ty, tz, 1
+    ]);
+}
+
+function mat4_rotateZ(angleRad) {
+    var c = Math.cos(angleRad);
+    var s = Math.sin(angleRad);
+    return new Float32Array([
+         c, s, 0, 0,
+        -s, c, 0, 0,
+         0, 0, 1, 0,
+         0, 0, 0, 1
+    ]);
+}
+
+function mat4_scale(sx, sy, sz) {
+    return new Float32Array([
+        sx, 0,  0,  0,
+        0,  sy, 0,  0,
+        0,  0,  sz, 0,
+        0,  0,  0,  1
+    ]);
+}
+
+function mat4_multiply(a, b) {
+    // Multiply two 4x4 matrices (column-major). Result = a * b
+    var result = new Float32Array(16);
+    for (var col = 0; col < 4; col++) {
+        for (var row = 0; row < 4; row++) {
+            var sum = 0.0;
+            for (var k = 0; k < 4; k++) {
+                sum += a[k * 4 + row] * b[col * 4 + k];
+            }
+            result[col * 4 + row] = sum;
+        }
+    }
+    return result;
+}
+
+// Chain multiple matrices together: m1 * m2 * m3 * ...
+function mat4_chain() {
+    var result = arguments[0];
+    for (var i = 1; i < arguments.length; i++) {
+        result = mat4_multiply(result, arguments[i]);
+    }
+    return result;
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Global Variables
+////////////////////////////////////////////////////////////////////////////////
+var canvas;
+var gl;
+var program;
+
+var uModelMatrixLoc;
+var uColorLoc;
+
+// VAOs and vertex counts for our two basic shapes
+var rectVAO;
+var rectVertexCount;
+var circleVAO;
+var circleVertexCount;
+
+// Slider-controlled values for figure position and joint angles
+var sFigureX = 0.0;
+var sFigureY = -0.1;
+var sLeftArmAngle  =  20.0;   // degrees
+var sRightArmAngle = -20.0;
+var sLeftLegAngle  =  15.0;
+var sRightLegAngle = -15.0;
+
+var walkAnimating = false;
+var walkTime = 0.0;
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Shape Creation Functions
+// Each creates a VAO with vertex data for a unit shape centered at origin.
+// Rectangle: unit square from (-0.5,-0.5) to (0.5,0.5)
+// Circle: approximation using triangle fan, radius 0.5
+////////////////////////////////////////////////////////////////////////////////
+
+function createRectangleVAO(gl, program) {
+    // Unit rectangle centered at origin: (-0.5, -0.5) to (0.5, 0.5)
+    var vertices = new Float32Array([
+        -0.5, -0.5,  0.0, 1.0,
+         0.5, -0.5,  0.0, 1.0,
+         0.5,  0.5,  0.0, 1.0,
+        -0.5,  0.5,  0.0, 1.0
+    ]);
+
+    var vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+
+    var buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+    var aPosition = gl.getAttribLocation(program, "aPosition");
+    gl.vertexAttribPointer(aPosition, 4, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(aPosition);
+
+    gl.bindVertexArray(null);
+
+    return { vao: vao, count: 4 };
+}
+
+function createCircleVAO(gl, program) {
+    // Circle approximation using TRIANGLE_FAN
+    // Center point + N points around the circle, radius 0.5
+    var N = 36;  // number of segments
+    var verts = [];
+    
+    // Center point
+    verts.push(0.0, 0.0, 0.0, 1.0);
+
+    for (var i = 0; i <= N; i++) {
+        var angle = (2.0 * Math.PI * i) / N;
+        verts.push(0.5 * Math.cos(angle), 0.5 * Math.sin(angle), 0.0, 1.0);
+    }
+
+    var vertices = new Float32Array(verts);
+
+    var vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+
+    var buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+    var aPosition = gl.getAttribLocation(program, "aPosition");
+    gl.vertexAttribPointer(aPosition, 4, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(aPosition);
+
+    gl.bindVertexArray(null);
+
+    return { vao: vao, count: N + 2 };
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Drawing Helpers
+// drawRect and drawCircle: bind the appropriate VAO, set the model matrix
+// and color uniforms, then issue the draw call.
+////////////////////////////////////////////////////////////////////////////////
+
+function drawRect(modelMatrix, color) {
+    gl.uniformMatrix4fv(uModelMatrixLoc, false, modelMatrix);
+    gl.uniform4fv(uColorLoc, color);
+    gl.bindVertexArray(rectVAO);
+    gl.drawArrays(gl.TRIANGLE_FAN, 0, rectVertexCount);
+}
+
+function drawCircle(modelMatrix, color) {
+    gl.uniformMatrix4fv(uModelMatrixLoc, false, modelMatrix);
+    gl.uniform4fv(uColorLoc, color);
+    gl.bindVertexArray(circleVAO);
+    gl.drawArrays(gl.TRIANGLE_FAN, 0, circleVertexCount);
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// EXECUTION: Code executes starting here when we launch this file
+////////////////////////////////////////////////////////////////////////////////
+window.onload = function init()
+{
+    canvas = document.getElementById( "gl-canvas" );
+
+    //  Grab the section of the screen for drawing.
+    //  All graphic output is within the canvas
+    gl = canvas.getContext('webgl2');
+    if (!gl) { alert( "WebGL 2.0 isn't available" ); }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    //  Load shaders and initialize attribute buffers
+    //
+    program = initShaders( gl, "vertex-shader", "fragment-shader" );
+    gl.useProgram( program );
+
+    ////////////////////////////////////////////////////////////////////////////////
+    // Get locations of uniform variables
+    //
+    uModelMatrixLoc = gl.getUniformLocation(program, "uModelMatrix");
+    uColorLoc = gl.getUniformLocation(program, "uColor");
+
+    ////////////////////////////////////////////////////////////////////////////////
+    // Create VAOs for our two basic shapes (instances reused with different transforms)
+    //
+    var rectData = createRectangleVAO(gl, program);
+    rectVAO = rectData.vao;
+    rectVertexCount = rectData.count;
+
+    var circleData = createCircleVAO(gl, program);
+    circleVAO = circleData.vao;
+    circleVertexCount = circleData.count;
+
+    ////////////////////////////////////////////////////////////////////////////////
+    //  Setup Event Handlers
+    //
+
+    document.getElementById("sliderX").oninput = function(event) {
+        sFigureX = parseFloat(event.target.value);
+        document.getElementById("valX").textContent = sFigureX.toFixed(2);
+    };
+
+    document.getElementById("sliderY").oninput = function(event) {
+        sFigureY = parseFloat(event.target.value);
+        document.getElementById("valY").textContent = sFigureY.toFixed(2);
+    };
+
+    document.getElementById("sliderLeftArm").oninput = function(event) {
+        sLeftArmAngle = parseFloat(event.target.value);
+        document.getElementById("valLA").innerHTML = sLeftArmAngle.toFixed(0) + "&deg;";
+    };
+
+    document.getElementById("sliderRightArm").oninput = function(event) {
+        sRightArmAngle = parseFloat(event.target.value);
+        document.getElementById("valRA").innerHTML = sRightArmAngle.toFixed(0) + "&deg;";
+    };
+
+    document.getElementById("sliderLeftLeg").oninput = function(event) {
+        sLeftLegAngle = parseFloat(event.target.value);
+        document.getElementById("valLL").innerHTML = sLeftLegAngle.toFixed(0) + "&deg;";
+    };
+
+    document.getElementById("sliderRightLeg").oninput = function(event) {
+        sRightLegAngle = parseFloat(event.target.value);
+        document.getElementById("valRL").innerHTML = sRightLegAngle.toFixed(0) + "&deg;";
+    };
+
+    document.getElementById("btnWalk").onclick = function() {
+        walkAnimating = !walkAnimating;
+        if (walkAnimating) {
+            walkTime = Date.now() * 0.001;
+        }
+    };
+
+    document.getElementById("btnReset").onclick = function() {
+        walkAnimating = false;
+        sLeftArmAngle = 20.0;   sRightArmAngle = -20.0;
+        sLeftLegAngle = 15.0;   sRightLegAngle = -15.0;
+        sFigureX = 0.0;         sFigureY = -0.1;
+        // Reset slider positions
+        document.getElementById("sliderX").value = 0.0;
+        document.getElementById("sliderY").value = -0.1;
+        document.getElementById("sliderLeftArm").value = 20;
+        document.getElementById("sliderRightArm").value = -20;
+        document.getElementById("sliderLeftLeg").value = 15;
+        document.getElementById("sliderRightLeg").value = -15;
+        document.getElementById("valX").textContent = "0.00";
+        document.getElementById("valY").textContent = "-0.10";
+        document.getElementById("valLA").innerHTML = "20&deg;";
+        document.getElementById("valRA").innerHTML = "-20&deg;";
+        document.getElementById("valLL").innerHTML = "15&deg;";
+        document.getElementById("valRL").innerHTML = "-15&deg;";
+    };
+
+    ////////////////////////////////////////////////////////////////////////////////
+    // Configure WebGL settings and draw
+    //
+    gl.viewport( 0, 0, canvas.width, canvas.height );
+    gl.clearColor( 0.85, 0.9, 0.95, 1.0 );  // Light sky blue background
+
+    // Render
+    render();
+};
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Render Function - draws the stick figure each frame
+//
+// Joint hierarchy (transformations apply parent-first):
+//   Root (figure X,Y translation)
+//     -> Torso (rectangle)
+//     -> Head  (circle, on top of torso)
+//     -> Left Upper Arm  (shoulder joint rotation)
+//         -> Left Forearm (offset from upper arm end)
+//     -> Right Upper Arm (shoulder joint rotation)
+//         -> Right Forearm (offset from upper arm end)
+//     -> Left Thigh (hip joint rotation)
+//         -> Left Shin (offset from thigh end)
+//     -> Right Thigh (hip joint rotation)
+//         -> Right Shin (offset from thigh end)
+////////////////////////////////////////////////////////////////////////////////
+
+function render()
+{
+    gl.clear( gl.COLOR_BUFFER_BIT );
+
+    // Walk animation: auto-swing arms and legs
+    if (walkAnimating) {
+        var t = Date.now() * 0.001;
+        var swingArm = 40.0 * Math.sin(4.0 * t);
+        var swingLeg = 30.0 * Math.sin(4.0 * t);
+        sLeftArmAngle  =  swingArm;
+        sRightArmAngle = -swingArm;
+        sLeftLegAngle  =  swingLeg;
+        sRightLegAngle = -swingLeg;
+
+        // Also slowly walk across the screen
+        sFigureX = 0.6 * Math.sin(0.5 * t);
+
+        // Update slider displays
+        document.getElementById("sliderLeftArm").value = sLeftArmAngle;
+        document.getElementById("sliderRightArm").value = sRightArmAngle;
+        document.getElementById("sliderLeftLeg").value = sLeftLegAngle;
+        document.getElementById("sliderRightLeg").value = sRightLegAngle;
+        document.getElementById("sliderX").value = sFigureX;
+        document.getElementById("valLA").innerHTML = sLeftArmAngle.toFixed(0) + "&deg;";
+        document.getElementById("valRA").innerHTML = sRightArmAngle.toFixed(0) + "&deg;";
+        document.getElementById("valLL").innerHTML = sLeftLegAngle.toFixed(0) + "&deg;";
+        document.getElementById("valRL").innerHTML = sRightLegAngle.toFixed(0) + "&deg;";
+        document.getElementById("valX").textContent = sFigureX.toFixed(2);
+    }
+
+    // Convert joint angles from degrees to radians
+    var leftArmRad  = sLeftArmAngle  * Math.PI / 180.0;
+    var rightArmRad = sRightArmAngle * Math.PI / 180.0;
+    var leftLegRad  = sLeftLegAngle  * Math.PI / 180.0;
+    var rightLegRad = sRightLegAngle * Math.PI / 180.0;
+
+    //--------------------------------------------------------------------------
+    // Root transform: move the whole figure to (sFigureX, sFigureY)
+    //--------------------------------------------------------------------------
+    var rootT = mat4_translate(sFigureX, sFigureY, 0.0);
+
+    //--------------------------------------------------------------------------
+    // Body part dimensions (scale factors for the unit shapes)
+    //--------------------------------------------------------------------------
+    var torsoW = 0.14;   var torsoH = 0.24;
+    var headR  = 0.10;   // diameter will be 0.20 since circle radius is 0.5 * scale
+    var armW   = 0.05;   var armH   = 0.16;
+    var foreW  = 0.04;   var foreH  = 0.14;
+    var thighW = 0.06;   var thighH = 0.18;
+    var shinW  = 0.05;   var shinH  = 0.16;
+
+    //--------------------------------------------------------------------------
+    // TORSO - rectangle centered at figure origin
+    // Instance transform: just scale the unit rect to torso size
+    //--------------------------------------------------------------------------
+    var torsoMatrix = mat4_chain(
+        rootT,
+        mat4_scale(torsoW, torsoH, 1.0)
+    );
+    drawRect(torsoMatrix, [0.25, 0.45, 0.82, 1.0]);  // Blue shirt
+
+    //--------------------------------------------------------------------------
+    // HEAD - circle on top of torso
+    // Position: up by half torso height + head radius
+    //--------------------------------------------------------------------------
+    var headMatrix = mat4_chain(
+        rootT,
+        mat4_translate(0.0, torsoH / 2.0 + headR, 0.0),
+        mat4_scale(headR * 2.0, headR * 2.0, 1.0)
+    );
+    drawCircle(headMatrix, [0.94, 0.78, 0.65, 1.0]);  // Skin tone
+
+    //--------------------------------------------------------------------------
+    // LEFT UPPER ARM
+    // Pivot (shoulder) is at top-left corner of torso
+    // Rotation happens at the shoulder pivot point
+    // The arm hangs down from the pivot, so its center is offset downward
+    //--------------------------------------------------------------------------
+    var leftShoulderX = -torsoW / 2.0 - armW / 2.0;
+    var leftShoulderY =  torsoH / 2.0 - 0.02;
+
+    // Transform chain: root -> translate to shoulder -> rotate -> translate arm center down
+    var leftUpperArmBase = mat4_chain(
+        rootT,
+        mat4_translate(leftShoulderX, leftShoulderY, 0.0),
+        mat4_rotateZ(leftArmRad)
+    );
+    var leftUpperArmMatrix = mat4_chain(
+        leftUpperArmBase,
+        mat4_translate(0.0, -armH / 2.0, 0.0),
+        mat4_scale(armW, armH, 1.0)
+    );
+    drawRect(leftUpperArmMatrix, [0.94, 0.78, 0.65, 1.0]);  // Skin tone
+
+    //--------------------------------------------------------------------------
+    // LEFT FOREARM (child of left upper arm)
+    // Pivot (elbow) is at the end of the upper arm
+    //--------------------------------------------------------------------------
+    var leftForearmMatrix = mat4_chain(
+        leftUpperArmBase,
+        mat4_translate(0.0, -armH, 0.0),        // move to elbow position
+        mat4_translate(0.0, -foreH / 2.0, 0.0), // offset forearm center
+        mat4_scale(foreW, foreH, 1.0)
+    );
+    drawRect(leftForearmMatrix, [0.90, 0.72, 0.58, 1.0]);  // Slightly darker skin
+
+    //--------------------------------------------------------------------------
+    // RIGHT UPPER ARM (mirror of left)
+    //--------------------------------------------------------------------------
+    var rightShoulderX =  torsoW / 2.0 + armW / 2.0;
+    var rightShoulderY =  torsoH / 2.0 - 0.02;
+
+    var rightUpperArmBase = mat4_chain(
+        rootT,
+        mat4_translate(rightShoulderX, rightShoulderY, 0.0),
+        mat4_rotateZ(rightArmRad)
+    );
+    var rightUpperArmMatrix = mat4_chain(
+        rightUpperArmBase,
+        mat4_translate(0.0, -armH / 2.0, 0.0),
+        mat4_scale(armW, armH, 1.0)
+    );
+    drawRect(rightUpperArmMatrix, [0.94, 0.78, 0.65, 1.0]);
+
+    //--------------------------------------------------------------------------
+    // RIGHT FOREARM
+    //--------------------------------------------------------------------------
+    var rightForearmMatrix = mat4_chain(
+        rightUpperArmBase,
+        mat4_translate(0.0, -armH, 0.0),
+        mat4_translate(0.0, -foreH / 2.0, 0.0),
+        mat4_scale(foreW, foreH, 1.0)
+    );
+    drawRect(rightForearmMatrix, [0.90, 0.72, 0.58, 1.0]);
+
+    //--------------------------------------------------------------------------
+    // LEFT THIGH
+    // Pivot (hip) is at bottom-left of torso
+    //--------------------------------------------------------------------------
+    var leftHipX = -torsoW / 4.0;
+    var leftHipY = -torsoH / 2.0;
+
+    var leftThighBase = mat4_chain(
+        rootT,
+        mat4_translate(leftHipX, leftHipY, 0.0),
+        mat4_rotateZ(leftLegRad)
+    );
+    var leftThighMatrix = mat4_chain(
+        leftThighBase,
+        mat4_translate(0.0, -thighH / 2.0, 0.0),
+        mat4_scale(thighW, thighH, 1.0)
+    );
+    drawRect(leftThighMatrix, [0.22, 0.22, 0.35, 1.0]);  // Dark pants
+
+    //--------------------------------------------------------------------------
+    // LEFT SHIN (child of left thigh)
+    //--------------------------------------------------------------------------
+    var leftShinMatrix = mat4_chain(
+        leftThighBase,
+        mat4_translate(0.0, -thighH, 0.0),
+        mat4_translate(0.0, -shinH / 2.0, 0.0),
+        mat4_scale(shinW, shinH, 1.0)
+    );
+    drawRect(leftShinMatrix, [0.18, 0.18, 0.28, 1.0]);  // Slightly darker
+
+    //--------------------------------------------------------------------------
+    // LEFT FOOT (small rectangle at bottom of shin)
+    //--------------------------------------------------------------------------
+    var leftFootMatrix = mat4_chain(
+        leftThighBase,
+        mat4_translate(0.0, -thighH - shinH, 0.0),
+        mat4_translate(0.01, -0.02, 0.0),
+        mat4_scale(0.07, 0.03, 1.0)
+    );
+    drawRect(leftFootMatrix, [0.15, 0.15, 0.15, 1.0]);  // Dark shoe
+
+    //--------------------------------------------------------------------------
+    // RIGHT THIGH
+    //--------------------------------------------------------------------------
+    var rightHipX =  torsoW / 4.0;
+    var rightHipY = -torsoH / 2.0;
+
+    var rightThighBase = mat4_chain(
+        rootT,
+        mat4_translate(rightHipX, rightHipY, 0.0),
+        mat4_rotateZ(rightLegRad)
+    );
+    var rightThighMatrix = mat4_chain(
+        rightThighBase,
+        mat4_translate(0.0, -thighH / 2.0, 0.0),
+        mat4_scale(thighW, thighH, 1.0)
+    );
+    drawRect(rightThighMatrix, [0.22, 0.22, 0.35, 1.0]);
+
+    //--------------------------------------------------------------------------
+    // RIGHT SHIN
+    //--------------------------------------------------------------------------
+    var rightShinMatrix = mat4_chain(
+        rightThighBase,
+        mat4_translate(0.0, -thighH, 0.0),
+        mat4_translate(0.0, -shinH / 2.0, 0.0),
+        mat4_scale(shinW, shinH, 1.0)
+    );
+    drawRect(rightShinMatrix, [0.18, 0.18, 0.28, 1.0]);
+
+    //--------------------------------------------------------------------------
+    // RIGHT FOOT
+    //--------------------------------------------------------------------------
+    var rightFootMatrix = mat4_chain(
+        rightThighBase,
+        mat4_translate(0.0, -thighH - shinH, 0.0),
+        mat4_translate(0.01, -0.02, 0.0),
+        mat4_scale(0.07, 0.03, 1.0)
+    );
+    drawRect(rightFootMatrix, [0.15, 0.15, 0.15, 1.0]);
+
+    //--------------------------------------------------------------------------
+    // EYES (two small circles on the head)
+    //--------------------------------------------------------------------------
+    var eyeSize = 0.025;
+    var leftEyeMatrix = mat4_chain(
+        rootT,
+        mat4_translate(-0.03, torsoH / 2.0 + headR + 0.01, 0.0),
+        mat4_scale(eyeSize, eyeSize, 1.0)
+    );
+    drawCircle(leftEyeMatrix, [0.1, 0.1, 0.1, 1.0]);
+
+    var rightEyeMatrix = mat4_chain(
+        rootT,
+        mat4_translate(0.03, torsoH / 2.0 + headR + 0.01, 0.0),
+        mat4_scale(eyeSize, eyeSize, 1.0)
+    );
+    drawCircle(rightEyeMatrix, [0.1, 0.1, 0.1, 1.0]);
+
+    //--------------------------------------------------------------------------
+    // MOUTH (small wide rectangle)
+    //--------------------------------------------------------------------------
+    var mouthMatrix = mat4_chain(
+        rootT,
+        mat4_translate(0.0, torsoH / 2.0 + headR - 0.03, 0.0),
+        mat4_scale(0.04, 0.012, 1.0)
+    );
+    drawRect(mouthMatrix, [0.75, 0.35, 0.3, 1.0]);
+
+    requestAnimationFrame(render);
+};
+
+</script>
+
+</html>

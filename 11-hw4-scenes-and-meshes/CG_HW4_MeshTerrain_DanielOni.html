@@ -1,0 +1,562 @@
+<html>
+
+<!--
+    CG_HW4_MeshTerrain_DanielOni.html
+    CS 7382 - Computer Graphics, Spring 2026
+
+    Generates a finite planar mesh using layered sin/cos waves for a hilly terrain.
+    The mesh is in the XZ-plane with Y as height, centered at the world origin.
+    Surface normals are computed per-vertex for basic lighting.
+    Interactive sliders control camera rotation to view the mesh from different angles.
+-->
+
+<!-- VERTEX SHADER SOURCE CODE: Written in GLSL -->
+<script id="vertex-shader" type="x-shader/x-vertex">
+#version 300 es
+
+in vec4 aPosition;      // Vertex position (x, y, z, 1)
+in vec3 aNormal;         // Vertex normal
+in vec4 aColor;          // Vertex color (height-based)
+
+out vec4 vColor;
+
+uniform vec3 uTheta;     // Rotation angles for X, Y, Z axes (in radians)
+uniform float uScale;    // Zoom scale factor
+
+void main()
+{
+    // Compute sines and cosines for each rotation axis
+    // Same pattern as 3DViewer.html from class
+    vec3 c = cos(uTheta);
+    vec3 s = sin(uTheta);
+
+    // Column-major rotation matrices (same as class example)
+    mat4 rx = mat4( 1.0,  0.0,  0.0, 0.0,
+                    0.0,  c.x,  s.x, 0.0,
+                    0.0, -s.x,  c.x, 0.0,
+                    0.0,  0.0,  0.0, 1.0 );
+
+    mat4 ry = mat4( c.y, 0.0, -s.y, 0.0,
+                    0.0, 1.0,  0.0, 0.0,
+                    s.y, 0.0,  c.y, 0.0,
+                    0.0, 0.0,  0.0, 1.0 );
+
+    mat4 rz = mat4( c.z,  s.z, 0.0, 0.0,
+                   -s.z,  c.z, 0.0, 0.0,
+                    0.0,  0.0, 1.0, 0.0,
+                    0.0,  0.0, 0.0, 1.0 );
+
+    // Apply rotations and scale
+    vec4 pos = vec4(aPosition.xyz * uScale, 1.0);
+    gl_Position = rz * ry * rx * pos;
+
+    // Basic directional lighting
+    // Light coming from upper-right-front direction
+    vec3 lightDir = normalize(vec3(0.4, 0.8, 0.5));
+
+    // Transform the normal by the same rotation (for correct lighting after rotation)
+    mat3 normalMatrix = mat3(rz * ry * rx);
+    vec3 transformedNormal = normalize(normalMatrix * aNormal);
+
+    // Diffuse lighting: N dot L clamped to [0,1]
+    float diffuse = max(dot(transformedNormal, lightDir), 0.0);
+
+    // Ambient + diffuse
+    float ambient = 0.3;
+    float brightness = ambient + 0.7 * diffuse;
+
+    vColor = vec4(aColor.rgb * brightness, 1.0);
+    gl_PointSize = 3.0;
+}
+</script>
+
+<!-- FRAGMENT SHADER SOURCE CODE: Written in GLSL -->
+<script id="fragment-shader" type="x-shader/x-fragment">
+#version 300 es
+
+precision mediump float;
+
+in vec4 vColor;
+out vec4 fColor;
+
+void main()
+{
+    fColor = vColor;
+}
+</script>
+
+<body>
+<h3>HW4 Mesh Terrain - Layered Sin/Cos Hills (Daniel Oni)</h3>
+<canvas id="gl-canvas" width="512" height="512"> </canvas>
+
+<div>
+    <b>Camera Rotation:</b><br>
+    Rotate X <input id="rotateX" type="range" min="-180" max="180" step="1" value="-35" />
+    <span id="valRX">-35&deg;</span>
+</div>
+<div>
+    Rotate Y <input id="rotateY" type="range" min="-180" max="180" step="1" value="25" />
+    <span id="valRY">25&deg;</span>
+</div>
+<div>
+    Rotate Z <input id="rotateZ" type="range" min="-180" max="180" step="1" value="0" />
+    <span id="valRZ">0&deg;</span>
+</div>
+<div>
+    Zoom <input id="zoomSlider" type="range" min="0.3" max="2.0" step="0.05" value="0.85" />
+    <span id="valZoom">0.85</span>
+</div>
+<br>
+<div>
+    <b>Render Mode:</b>
+    <button id="btnSolid">Solid</button>
+    <button id="btnWire">Wireframe</button>
+    <button id="btnPoints">Points</button>
+    <button id="btnAutoRotate">Toggle Auto-Rotate</button>
+</div>
+</body>
+
+
+<!-- Written in Javascript -->
+<script>
+
+////////////////////////////////////////////////////////////////////////////////
+// initShaders - compiles and links shaders (same pattern as class examples)
+////////////////////////////////////////////////////////////////////////////////
+function initShaders( gl, vertexShaderId, fragmentShaderId )
+{
+    var vertShdr;
+    var fragShdr;
+
+    var vertElem = document.getElementById( vertexShaderId );
+    if ( !vertElem ) {
+        alert( "Unable to load vertex shader " + vertexShaderId );
+        return -1;
+    }
+    else {
+        vertShdr = gl.createShader( gl.VERTEX_SHADER );
+        gl.shaderSource( vertShdr, vertElem.textContent.replace(/^\s+|\s+$/g, '' ));
+        gl.compileShader( vertShdr );
+        if ( !gl.getShaderParameter(vertShdr, gl.COMPILE_STATUS) ) {
+            var msg = "Vertex shader failed to compile.  The error log is:"
+                + "<pre>" + gl.getShaderInfoLog( vertShdr ) + "</pre>";
+            alert( msg );
+            return -1;
+        }
+    }
+
+    var fragElem = document.getElementById( fragmentShaderId );
+    if ( !fragElem ) {
+        alert( "Unable to load fragment shader " + fragmentShaderId );
+        return -1;
+    }
+    else {
+        fragShdr = gl.createShader( gl.FRAGMENT_SHADER );
+        gl.shaderSource( fragShdr, fragElem.textContent.replace(/^\s+|\s+$/g, '' ) );
+        gl.compileShader( fragShdr );
+        if ( !gl.getShaderParameter(fragShdr, gl.COMPILE_STATUS) ) {
+            var msg = "Fragment shader failed to compile.  The error log is:"
+                + "<pre>" + gl.getShaderInfoLog( fragShdr ) + "</pre>";
+            alert( msg );
+            return -1;
+        }
+    }
+
+    var program = gl.createProgram();
+    gl.attachShader( program, vertShdr );
+    gl.attachShader( program, fragShdr );
+    gl.linkProgram( program );
+
+    if ( !gl.getProgramParameter(program, gl.LINK_STATUS) ) {
+        var msg = "Shader program failed to link.  The error log is:"
+            + "<pre>" + gl.getProgramInfoLog( program ) + "</pre>";
+        alert( msg );
+        return -1;
+    }
+
+    return program;
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Global Variables
+////////////////////////////////////////////////////////////////////////////////
+var canvas;
+var gl;
+var program;
+
+// Uniform locations
+var uThetaLoc;
+var uScaleLoc;
+
+// Camera rotation angles (degrees, converted to radians in render)
+var sRotateX = -35.0;
+var sRotateY =  25.0;
+var sRotateZ =   0.0;
+var sZoom    =   0.85;
+
+// Render mode: 0 = solid, 1 = wireframe, 2 = points
+var renderMode = 0;
+var autoRotate = false;
+
+// Mesh data
+var GRID_SIZE = 60;    // number of subdivisions along each axis
+var numTriangleIndices = 0;
+var numLineIndices = 0;
+var numVertices = 0;
+
+// VAO
+var meshVAO;
+var triangleIndexBuffer;
+var wireframeIndexBuffer;
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Terrain Height Function
+// Layered sin/cos waves to produce an interesting hilly landscape.
+// NOT the hat function from class - this is a custom combination.
+////////////////////////////////////////////////////////////////////////////////
+function terrainHeight(x, z) {
+    // Layer 1: broad rolling hills
+    var h = 0.15 * Math.sin(2.5 * x) * Math.cos(2.5 * z);
+    // Layer 2: medium frequency ridges
+    h += 0.08 * Math.sin(5.0 * x + 1.0) * Math.cos(4.0 * z - 0.5);
+    // Layer 3: smaller ripples for detail
+    h += 0.04 * Math.sin(9.0 * x - 2.0) * Math.sin(8.0 * z + 1.5);
+    // Layer 4: gentle large-scale slope
+    h += 0.06 * Math.cos(1.5 * x + 0.5) * Math.sin(1.8 * z);
+    return h;
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Color based on height - green valleys, brown/tan hills, white-ish peaks
+////////////////////////////////////////////////////////////////////////////////
+function heightColor(y, minY, maxY) {
+    // Normalize height to [0, 1]
+    var t = (y - minY) / (maxY - minY + 0.001);
+
+    var r, g, b;
+    if (t < 0.25) {
+        // Low: dark green (valley)
+        r = 0.15 + 0.1 * t;
+        g = 0.4 + 0.3 * t;
+        b = 0.15;
+    } else if (t < 0.5) {
+        // Mid-low: lighter green
+        var s = (t - 0.25) / 0.25;
+        r = 0.18 + 0.25 * s;
+        g = 0.5 + 0.15 * s;
+        b = 0.15 + 0.1 * s;
+    } else if (t < 0.75) {
+        // Mid-high: brown/tan
+        var s = (t - 0.5) / 0.25;
+        r = 0.45 + 0.2 * s;
+        g = 0.55 - 0.05 * s;
+        b = 0.25 + 0.1 * s;
+    } else {
+        // High: light tan / near white (peaks)
+        var s = (t - 0.75) / 0.25;
+        r = 0.65 + 0.25 * s;
+        g = 0.5 + 0.35 * s;
+        b = 0.35 + 0.45 * s;
+    }
+    return [r, g, b, 1.0];
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Generate the Mesh
+// Creates a grid of vertices in the XZ-plane, centered at origin.
+// Height (Y) comes from the terrainHeight function.
+// Computes per-vertex normals by averaging face normals of adjacent triangles.
+////////////////////////////////////////////////////////////////////////////////
+function generateMesh() {
+    var rows = GRID_SIZE;
+    var cols = GRID_SIZE;
+    var totalVerts = (rows + 1) * (cols + 1);
+
+    // Step 1: Generate vertex positions and find height range
+    var positions = [];  // x, y, z per vertex
+    var minY =  Infinity;
+    var maxY = -Infinity;
+
+    for (var r = 0; r <= rows; r++) {
+        for (var c = 0; c <= cols; c++) {
+            // Map grid coords to XZ plane centered at origin: [-1, 1]
+            var x = -1.0 + (2.0 * c) / cols;
+            var z = -1.0 + (2.0 * r) / rows;
+            var y = terrainHeight(x, z);
+
+            positions.push(x, y, z);
+
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+        }
+    }
+
+    // Step 2: Generate triangle indices (two triangles per grid cell, CCW winding)
+    // CCW winding is important for correct normals (from class lecture on 
+    // inward/outward facing polygons)
+    var triIndices = [];
+    for (var r = 0; r < rows; r++) {
+        for (var c = 0; c < cols; c++) {
+            var topLeft     = r * (cols + 1) + c;
+            var topRight    = topLeft + 1;
+            var bottomLeft  = (r + 1) * (cols + 1) + c;
+            var bottomRight = bottomLeft + 1;
+
+            // Triangle 1: topLeft -> bottomLeft -> topRight (CCW when viewed from above)
+            triIndices.push(topLeft, bottomLeft, topRight);
+            // Triangle 2: topRight -> bottomLeft -> bottomRight (CCW)
+            triIndices.push(topRight, bottomLeft, bottomRight);
+        }
+    }
+
+    // Step 3: Compute per-vertex normals by averaging adjacent face normals
+    // This gives us smooth shading across the terrain surface.
+    var normals = new Array(totalVerts * 3).fill(0.0);
+
+    for (var i = 0; i < triIndices.length; i += 3) {
+        var i0 = triIndices[i];
+        var i1 = triIndices[i + 1];
+        var i2 = triIndices[i + 2];
+
+        // Get the three vertex positions
+        var p0x = positions[i0 * 3],     p0y = positions[i0 * 3 + 1], p0z = positions[i0 * 3 + 2];
+        var p1x = positions[i1 * 3],     p1y = positions[i1 * 3 + 1], p1z = positions[i1 * 3 + 2];
+        var p2x = positions[i2 * 3],     p2y = positions[i2 * 3 + 1], p2z = positions[i2 * 3 + 2];
+
+        // Two edge vectors
+        var e1x = p1x - p0x, e1y = p1y - p0y, e1z = p1z - p0z;
+        var e2x = p2x - p0x, e2y = p2y - p0y, e2z = p2z - p0z;
+
+        // Cross product (e1 x e2) gives face normal
+        var nx = e1y * e2z - e1z * e2y;
+        var ny = e1z * e2x - e1x * e2z;
+        var nz = e1x * e2y - e1y * e2x;
+
+        // Accumulate into each vertex's normal
+        normals[i0 * 3]     += nx;  normals[i0 * 3 + 1] += ny;  normals[i0 * 3 + 2] += nz;
+        normals[i1 * 3]     += nx;  normals[i1 * 3 + 1] += ny;  normals[i1 * 3 + 2] += nz;
+        normals[i2 * 3]     += nx;  normals[i2 * 3 + 1] += ny;  normals[i2 * 3 + 2] += nz;
+    }
+
+    // Normalize all vertex normals
+    for (var v = 0; v < totalVerts; v++) {
+        var nx = normals[v * 3], ny = normals[v * 3 + 1], nz = normals[v * 3 + 2];
+        var len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+        if (len > 0.0001) {
+            normals[v * 3]     /= len;
+            normals[v * 3 + 1] /= len;
+            normals[v * 3 + 2] /= len;
+        }
+    }
+
+    // Step 4: Assign colors based on height
+    var colors = [];
+    for (var v = 0; v < totalVerts; v++) {
+        var y = positions[v * 3 + 1];
+        var col = heightColor(y, minY, maxY);
+        colors.push(col[0], col[1], col[2], col[3]);
+    }
+
+    // Step 5: Generate wireframe indices (edges of each triangle, no duplicates needed for visual)
+    var wireIndices = [];
+    for (var r = 0; r < rows; r++) {
+        for (var c = 0; c < cols; c++) {
+            var topLeft     = r * (cols + 1) + c;
+            var topRight    = topLeft + 1;
+            var bottomLeft  = (r + 1) * (cols + 1) + c;
+            var bottomRight = bottomLeft + 1;
+
+            // Horizontal edge (top)
+            wireIndices.push(topLeft, topRight);
+            // Vertical edge (left)
+            wireIndices.push(topLeft, bottomLeft);
+            // Diagonal
+            wireIndices.push(topRight, bottomLeft);
+        }
+        // Right edge of this row
+        var lastC = cols;
+        wireIndices.push(r * (cols + 1) + lastC, (r + 1) * (cols + 1) + lastC);
+    }
+    // Bottom row horizontal edges
+    for (var c = 0; c < cols; c++) {
+        wireIndices.push(rows * (cols + 1) + c, rows * (cols + 1) + c + 1);
+    }
+
+    return {
+        positions: new Float32Array(positions),
+        normals:   new Float32Array(normals),
+        colors:    new Float32Array(colors),
+        triIndices: new Uint32Array(triIndices),
+        wireIndices: new Uint32Array(wireIndices),
+        vertexCount: totalVerts
+    };
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// EXECUTION: Code executes starting here when we launch this file
+////////////////////////////////////////////////////////////////////////////////
+window.onload = function init()
+{
+    canvas = document.getElementById( "gl-canvas" );
+
+    //  Grab the section of the screen for drawing.
+    gl = canvas.getContext('webgl2');
+    if (!gl) { alert( "WebGL 2.0 isn't available" ); }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    //  Load shaders and initialize attribute buffers
+    //
+    program = initShaders( gl, "vertex-shader", "fragment-shader" );
+    gl.useProgram( program );
+
+    ////////////////////////////////////////////////////////////////////////////////
+    // Generate the mesh data
+    //
+    var mesh = generateMesh();
+    numVertices = mesh.vertexCount;
+    numTriangleIndices = mesh.triIndices.length;
+    numLineIndices = mesh.wireIndices.length;
+
+    ////////////////////////////////////////////////////////////////////////////////
+    // Create VAO and load buffers (similar pattern to 3DViewer.js)
+    //
+    meshVAO = gl.createVertexArray();
+    gl.bindVertexArray(meshVAO);
+
+    // Position buffer
+    var posBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, mesh.positions, gl.STATIC_DRAW);
+    var aPosition = gl.getAttribLocation(program, "aPosition");
+    gl.vertexAttribPointer(aPosition, 3, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(aPosition);
+
+    // Normal buffer
+    var normBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, normBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, mesh.normals, gl.STATIC_DRAW);
+    var aNormal = gl.getAttribLocation(program, "aNormal");
+    gl.vertexAttribPointer(aNormal, 3, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(aNormal);
+
+    // Color buffer
+    var colBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, colBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, mesh.colors, gl.STATIC_DRAW);
+    var aColor = gl.getAttribLocation(program, "aColor");
+    gl.vertexAttribPointer(aColor, 4, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(aColor);
+
+    // Triangle index buffer (element array)
+    triangleIndexBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, triangleIndexBuffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.triIndices, gl.STATIC_DRAW);
+
+    gl.bindVertexArray(null);
+
+    // Wireframe index buffer (separate, bound when needed)
+    wireframeIndexBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, wireframeIndexBuffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.wireIndices, gl.STATIC_DRAW);
+
+    ////////////////////////////////////////////////////////////////////////////////
+    // Get uniform locations
+    //
+    uThetaLoc = gl.getUniformLocation(program, "uTheta");
+    uScaleLoc = gl.getUniformLocation(program, "uScale");
+
+    ////////////////////////////////////////////////////////////////////////////////
+    //  Setup Event Handlers
+    //
+
+    document.getElementById("rotateX").oninput = function(event) {
+        sRotateX = parseFloat(event.target.value);
+        document.getElementById("valRX").innerHTML = sRotateX.toFixed(0) + "&deg;";
+    };
+
+    document.getElementById("rotateY").oninput = function(event) {
+        sRotateY = parseFloat(event.target.value);
+        document.getElementById("valRY").innerHTML = sRotateY.toFixed(0) + "&deg;";
+    };
+
+    document.getElementById("rotateZ").oninput = function(event) {
+        sRotateZ = parseFloat(event.target.value);
+        document.getElementById("valRZ").innerHTML = sRotateZ.toFixed(0) + "&deg;";
+    };
+
+    document.getElementById("zoomSlider").oninput = function(event) {
+        sZoom = parseFloat(event.target.value);
+        document.getElementById("valZoom").textContent = sZoom.toFixed(2);
+    };
+
+    document.getElementById("btnSolid").onclick = function() { renderMode = 0; };
+    document.getElementById("btnWire").onclick = function() { renderMode = 1; };
+    document.getElementById("btnPoints").onclick = function() { renderMode = 2; };
+    document.getElementById("btnAutoRotate").onclick = function() { autoRotate = !autoRotate; };
+
+    ////////////////////////////////////////////////////////////////////////////////
+    // Configure WebGL settings and draw
+    //
+    gl.viewport( 0, 0, canvas.width, canvas.height );
+    gl.clearColor( 0.12, 0.12, 0.18, 1.0 );   // Dark background
+
+    gl.enable(gl.DEPTH_TEST);  // Need depth testing for 3D mesh
+
+    // Render
+    render();
+};
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Render Function - draws the terrain mesh each frame
+////////////////////////////////////////////////////////////////////////////////
+function render()
+{
+    gl.clear( gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT );
+
+    // Auto-rotate: slowly spin around Y axis (like 3DViewer toggle)
+    if (autoRotate) {
+        sRotateY += 0.3;
+        if (sRotateY > 180) sRotateY -= 360;
+        document.getElementById("rotateY").value = sRotateY;
+        document.getElementById("valRY").innerHTML = sRotateY.toFixed(0) + "&deg;";
+    }
+
+    // Convert rotation angles from degrees to radians
+    var thetaX = sRotateX * Math.PI / 180.0;
+    var thetaY = sRotateY * Math.PI / 180.0;
+    var thetaZ = sRotateZ * Math.PI / 180.0;
+
+    // Set uniforms
+    gl.uniform3fv(uThetaLoc, [thetaX, thetaY, thetaZ]);
+    gl.uniform1f(uScaleLoc, sZoom);
+
+    // Bind mesh VAO
+    gl.bindVertexArray(meshVAO);
+
+    if (renderMode === 0) {
+        // Solid: draw filled triangles
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, triangleIndexBuffer);
+        gl.drawElements(gl.TRIANGLES, numTriangleIndices, gl.UNSIGNED_INT, 0);
+    }
+    else if (renderMode === 1) {
+        // Wireframe: draw lines
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, wireframeIndexBuffer);
+        gl.drawElements(gl.LINES, numLineIndices, gl.UNSIGNED_INT, 0);
+    }
+    else {
+        // Points: draw all vertices as points
+        gl.drawArrays(gl.POINTS, 0, numVertices);
+    }
+
+    requestAnimationFrame(render);
+};
+
+</script>
+
+</html>
