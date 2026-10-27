@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>CG Program 2 — Horse on Hills — Daniel Oni</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background: #f0f0f0;
+        }
+        h2 { margin-top: 0; }
+        #main-container {
+            display: flex;
+            gap: 24px;
+            flex-wrap: wrap;
+        }
+        #canvas-wrap {
+            flex-shrink: 0;
+        }
+        canvas {
+            border: 2px solid #444;
+            display: block;
+            background: #000;
+        }
+        #controls {
+            max-width: 320px;
+            font-size: 13px;
+        }
+        #controls h3 {
+            margin: 12px 0 6px 0;
+            padding-bottom: 3px;
+            border-bottom: 1px solid #aaa;
+        }
+        #controls h3:first-child { margin-top: 0; }
+        .ctrl-row {
+            display: flex;
+            align-items: center;
+            margin: 4px 0;
+        }
+        .ctrl-row label {
+            width: 115px;
+            flex-shrink: 0;
+        }
+        .ctrl-row input[type="range"] {
+            flex: 1;
+        }
+        .btn-row {
+            margin: 8px 0;
+        }
+        .btn-row button {
+            padding: 6px 16px;
+            margin-right: 8px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+
+<body>
+
+<h2>Program 2 &mdash; Articulated Horse on Rolling Hills</h2>
+
+<div id="main-container">
+
+<!-- ========================= CANVAS ========================= -->
+<div id="canvas-wrap">
+<canvas id="gl-canvas" width="600" height="600">
+    Oops … your browser doesn't support the HTML5 canvas element
+</canvas>
+</div>
+
+<!-- ======================== CONTROLS ======================== -->
+<div id="controls">
+
+    <h3>Camera</h3>
+    <div class="ctrl-row">
+        <label>Distance</label>
+        <input id="camRadius" type="range" min="3" max="25" step="0.5" value="12">
+    </div>
+    <div class="ctrl-row">
+        <label>Elevation</label>
+        <input id="camTheta" type="range" min="10" max="85" step="1" value="55">
+    </div>
+    <div class="ctrl-row">
+        <label>Orbit</label>
+        <input id="camPhi" type="range" min="0" max="360" step="1" value="45">
+    </div>
+
+    <h3>Horse Position</h3>
+    <div class="ctrl-row">
+        <label>Move X</label>
+        <input id="horseX" type="range" min="-6" max="6" step="0.1" value="0">
+    </div>
+    <div class="ctrl-row">
+        <label>Move Z</label>
+        <input id="horseZ" type="range" min="-6" max="6" step="0.1" value="0">
+    </div>
+    <div class="ctrl-row">
+        <label>Heading</label>
+        <input id="horseHeading" type="range" min="0" max="360" step="1" value="0">
+    </div>
+
+    <h3>Joint Controls</h3>
+    <div class="ctrl-row">
+        <label>Neck</label>
+        <input id="neckAngle" type="range" min="-60" max="10" step="1" value="-30">
+    </div>
+    <div class="ctrl-row">
+        <label>Head</label>
+        <input id="headAngle" type="range" min="-30" max="30" step="1" value="5">
+    </div>
+    <div class="ctrl-row">
+        <label>Tail</label>
+        <input id="tailAngle" type="range" min="100" max="200" step="1" value="145">
+    </div>
+    <div class="ctrl-row">
+        <label>Front-Left Leg</label>
+        <input id="flLeg" type="range" min="-35" max="35" step="1" value="0">
+    </div>
+    <div class="ctrl-row">
+        <label>Front-Right Leg</label>
+        <input id="frLeg" type="range" min="-35" max="35" step="1" value="0">
+    </div>
+    <div class="ctrl-row">
+        <label>Back-Left Leg</label>
+        <input id="blLeg" type="range" min="-35" max="35" step="1" value="0">
+    </div>
+    <div class="ctrl-row">
+        <label>Back-Right Leg</label>
+        <input id="brLeg" type="range" min="-35" max="35" step="1" value="0">
+    </div>
+
+    <h3>Animation</h3>
+    <div class="btn-row">
+        <button id="walkBtn">&#9654; Walk</button>
+        <button id="stopBtn">&#9632; Stop</button>
+        <button id="resetBtn">&#8634; Reset</button>
+    </div>
+
+    <h3>Light Position</h3>
+    <div class="ctrl-row">
+        <label>Light X</label>
+        <input id="lightX" type="range" min="-10" max="10" step="0.5" value="5">
+    </div>
+    <div class="ctrl-row">
+        <label>Light Y</label>
+        <input id="lightY" type="range" min="1" max="15" step="0.5" value="10">
+    </div>
+    <div class="ctrl-row">
+        <label>Light Z</label>
+        <input id="lightZ" type="range" min="-10" max="10" step="0.5" value="5">
+    </div>
+
+</div><!-- /controls -->
+</div><!-- /main-container -->
+
+
+<!-- ======================= SHADERS ========================== -->
+
+<script id="vertex-shader" type="x-shader/x-vertex">
+#version 300 es
+
+in vec4 aPosition;
+in vec4 aNormal;
+
+out vec3 N, L, E;
+
+uniform mat4 uModelMatrix;
+uniform mat4 uViewMatrix;
+uniform mat4 uProjectionMatrix;
+uniform mat3 uNormalMatrix;
+uniform vec4 uLightPosition;
+
+void main()
+{
+    mat4 modelView = uViewMatrix * uModelMatrix;
+    vec3 pos = (modelView * aPosition).xyz;
+
+    // Transform light to eye space
+    vec4 lightEye = uViewMatrix * uLightPosition;
+
+    if (uLightPosition.w == 0.0)
+        L = normalize(lightEye.xyz);
+    else
+        L = normalize(lightEye.xyz - pos);
+
+    E = -normalize(pos);
+    N = normalize(uNormalMatrix * aNormal.xyz);
+
+    gl_Position = uProjectionMatrix * modelView * aPosition;
+}
+</script>
+
+<script id="fragment-shader" type="x-shader/x-fragment">
+#version 300 es
+
+precision mediump float;
+
+uniform vec4 uAmbientProduct;
+uniform vec4 uDiffuseProduct;
+uniform vec4 uSpecularProduct;
+uniform float uShininess;
+
+in vec3 N, L, E;
+out vec4 fColor;
+
+void main()
+{
+    vec3 H = normalize(L + E);
+    vec4 ambient = uAmbientProduct;
+
+    float Kd = max(dot(L, N), 0.0);
+    vec4 diffuse = Kd * uDiffuseProduct;
+
+    float Ks = pow(max(dot(N, H), 0.0), uShininess);
+    vec4 specular = Ks * uSpecularProduct;
+
+    if (dot(L, N) < 0.0) specular = vec4(0.0, 0.0, 0.0, 1.0);
+
+    fColor = ambient + diffuse + specular;
+    fColor.a = 1.0;
+}
+</script>
+
+
+<!-- =================== LIBRARY SCRIPTS ====================== -->
+<script type="text/javascript" src="MVnew.js"></script>
+<script type="text/javascript" src="initShaders.js"></script>
+<script type="text/javascript" src="CG_S26_Program2_OniDaniel.js"></script>
+
+</body>
+</html>
