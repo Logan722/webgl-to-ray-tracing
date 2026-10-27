@@ -1,0 +1,225 @@
+<html>
+
+
+<!-- VERTEX SHADER: passes texture coordinates through (unchanged from starter) -->
+<script id="vertex-shader" type="x-shader/x-vertex">
+    #version 300 es
+
+    in vec4 aPosition;
+    in vec2 aTexCoord;
+
+    out vec2 vTexCoord;
+
+    void main()
+    {
+
+    gl_Position = aPosition;
+    vTexCoord = aTexCoord;
+
+    }
+</script>
+
+<!-- FRAGMENT SHADER: modified to apply a mosaic / pixelation photo filter -->
+<!-- Technique: quantize the interpolated texture coordinate so every fragment -->
+<!-- inside one grid cell samples the SAME texel from the webcam frame. -->
+<script id="fragment-shader" type="x-shader/x-fragment">
+    #version 300 es
+
+    precision mediump float;
+
+    in vec2 vTexCoord;
+    uniform sampler2D texturevid;
+    uniform float uBlocks;      // number of mosaic cells across the image
+
+    out vec4 fColor;
+
+    void main()
+    {
+        // Snap the incoming texture coordinate to the CENTER of its grid cell.
+        // floor(vTexCoord * uBlocks) gives the cell index (0, 1, 2, ...).
+        // Adding 0.5 and dividing by uBlocks places us in the middle of the cell.
+        // All fragments that fall in the same cell therefore read the same texel,
+        // which produces the chunky "big-pixel" mosaic look.
+        vec2 snappedCoord = (floor(vTexCoord * uBlocks) + 0.5) / uBlocks;
+
+        fColor = vec4( texture( texturevid, snappedCoord ).rgb, 1.0 );
+    }
+</script>
+
+<canvas id="gl-canvas" width="400" height="400"> </canvas>
+
+<video id="webcamVideo" style="display: none;"></video>
+
+<div>
+    Mosaic Cell Size CHUNKY <input id="slider" type="range"
+     min="5" max="400" step="1" value="40" />
+     FINE
+</div>
+
+<script src="initShaders.js"></script>
+
+<script>
+
+/**
+ * You must give the program access to your webcam. If you do not, the program will have a black box
+ * over where the video should go. Simply open the program in either Chrome or Safari and click allow
+ * when prompted to give access to webcam.
+ *
+ * Used code to read in webcam video from here: https://dev.to/learosema/realtime-video-processing-with-webgl-5653
+ */
+
+
+ "use strict";
+
+var canvas;
+var gl;
+var program;
+
+var texture1;
+
+var positionLoc, texCoordLoc;   // attribute locations
+var textureloc;                 // uniform location for the video texture
+var uBlocksLoc;                 // uniform location for mosaic cell count
+
+var blocks = 40;                // current mosaic grid resolution, driven by slider
+
+var video = document.querySelector('video');    // get video tag from HTML
+
+
+// Create two triangles with texture coordinates to make the image appear in a "quad"
+// vertices for flat square (x,y pairs)
+var square_vertices = new Float32Array ([
+    -1.0, -1.0,
+    -1.0, 1.0,
+
+    1.0, 1.0,
+
+    1.0, 1.0,
+
+    1.0, -1.0,
+    -1.0, -1.0
+] );
+
+//vertices for texture coordinates of the square
+
+var texCoord = new Float32Array ([
+    0, 0,
+    0, 1.0,
+    1.0, 1.0,
+    1.0, 1.0,
+    1.0, 0,
+    0, 0
+]);
+
+
+async function setup() {
+    try {
+        await accessWebcam(video);
+    } catch (ex) {
+        video = null;
+        console.error(ex.message);
+    }
+}
+
+function accessWebcam(video) {
+    return new Promise((resolve, reject) => {
+        const mediaConstraints = { audio: false, video: { width: 400, height: 400, brightness: {ideal: 2} } };
+        navigator.mediaDevices.getUserMedia(mediaConstraints).then(mediaStream => {
+        video.srcObject = mediaStream;
+        video.setAttribute('playsinline', true);
+        video.onloadedmetadata = (e) => {
+            video.play();
+            resolve(video);
+        }
+        }).catch(err => {
+        reject(err);
+        });
+    });
+}
+
+//--------------------------------------------
+
+window.onload = function init() {
+
+    canvas = document.getElementById( "gl-canvas" );
+
+    gl = canvas.getContext('webgl2');
+    if (!gl) { alert( "WebGL 2.0 isn't available" ); }
+
+    setup();    // access webcam
+
+    // Empty texture to hold video frame as texture
+    texture1 = gl.createTexture();
+    gl.activeTexture( gl.TEXTURE0);
+    gl.bindTexture( gl.TEXTURE_2D, texture1 );
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 400, 400, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+    //initialize the shaders
+    program = initShaders(gl, "vertex-shader", "fragment-shader");
+    gl.useProgram( program);
+
+    // Download vertices
+    var vbuffer = gl.createBuffer();
+    gl.bindBuffer( gl.ARRAY_BUFFER, vbuffer);
+    gl.bufferData(gl.ARRAY_BUFFER,   square_vertices, gl.STATIC_DRAW);
+    positionLoc = gl.getAttribLocation( program, "aPosition");
+    gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(positionLoc);
+
+    // Download texture coordinates
+    var tcbuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, tcbuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, texCoord, gl.STATIC_DRAW);
+    texCoordLoc = gl.getAttribLocation( program, "aTexCoord");
+    gl.vertexAttribPointer(texCoordLoc, 2, gl.FLOAT, false, 0, 0 );
+    gl.enableVertexAttribArray(texCoordLoc);
+
+    // Get uniform variable from fragment shader for texture to set texture unit
+    textureloc = gl.getUniformLocation(program, "texturevid");
+    gl.uniform1i( textureloc, 0);  // Set to texture unit 0
+
+    // Get uniform location for the mosaic filter's grid resolution
+    uBlocksLoc = gl.getUniformLocation(program, "uBlocks");
+
+    // Wire up the slider so we can change cell count at run time
+    document.getElementById("slider").onchange = function(event) {
+        blocks = event.target.value;
+    };
+
+    gl.viewport(0, 0, 400, 400);
+    gl.clearColor(0.5, 0.5, 0.5, 1.0);
+
+    render();
+
+}
+
+
+// Capture frame and download as new texture
+function render() {
+
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    // sets texture1 with frame from webcam
+    if (video && video.readyState >= video.HAVE_CURRENT_DATA) {
+
+        gl.activeTexture(gl.TEXTURE0);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+    }
+
+    // Push the current grid resolution to the fragment shader each frame
+    gl.uniform1f(uBlocksLoc, blocks);
+
+    gl.drawArrays( gl.TRIANGLES, 0, 6 )
+
+    requestAnimationFrame(render);
+}
+
+
+
+</script>
+
+</html>
