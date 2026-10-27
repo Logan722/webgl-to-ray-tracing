@@ -1,0 +1,289 @@
+
+<html>
+
+<!--
+    CG_HW2_MoveThatPoint_DanielOni.html
+    Computer Graphics - Homework 2: Move That Point
+
+    Parametric Curve: Butterfly curve r = e^sin(theta) - 2cos(4theta) + sin^5((2theta - pi)/24) mapped to XY
+    This curve crosses itself multiple times and produces a visually appealing pattern.
+
+    Features:
+    - Uniform variables (uOffsetX, uOffsetY) control point position in vertex shader
+    - Uniform variable (uColor) controls point color in fragment shader
+    - preserveDrawingBuffer: true to keep the trace visible
+    - Speed slider to control animation speed
+    - Clear button to erase canvas and continue drawing
+    - Color smoothly cycles over time using HSL-to-RGB conversion
+-->
+
+<!-- VERTEX SHADER SOURCE CODE: Written in GLSL -->
+<script id="vertex-shader" type="x-shader/x-vertex">
+#version 300 es
+
+// Uniform variables to offset the point position on the XY-plane
+uniform float uOffsetX;
+uniform float uOffsetY;
+uniform float uPointSize;
+
+void main()
+{
+    // Apply the parametric offset to position the point (z=0, 2D on XY-plane)
+    gl_Position = vec4(uOffsetX, uOffsetY, 0.0, 1.0);
+    gl_PointSize = uPointSize;
+}
+</script>
+
+
+<!-- FRAGMENT SHADER SOURCE CODE: Written in GLSL -->
+<script id="fragment-shader" type="x-shader/x-fragment">
+#version 300 es
+
+precision mediump float;
+
+// Uniform variable to set the color of the point from JavaScript
+uniform vec4 uColor;
+
+out vec4 fColor;
+
+void main()
+{
+    fColor = uColor;
+}
+</script>
+
+<!-- Canvas for WebGL rendering -->
+<canvas id="gl-canvas" width="512" height="512"
+    style="border: 1px solid #333; display: block; margin: 10px auto;">
+</canvas>
+
+<!-- UI Controls: Speed Slider and Clear Button -->
+<div style="text-align: center; font-family: Arial, sans-serif; margin-top: 8px;">
+    <label>Speed: SLOW
+        <input id="speedSlider" type="range"
+            min="0.0001" max="0.006" step="0.0001" value="0.0012" />
+        FAST
+    </label>
+    &nbsp;&nbsp;&nbsp;
+    <label>Point Size:
+        <input id="sizeSlider" type="range"
+            min="1" max="10" step="1" value="3" />
+    </label>
+    &nbsp;&nbsp;&nbsp;
+    <button id="clearBtn" style="padding: 4px 16px; font-size: 14px;">Clear</button>
+</div>
+
+
+<!-- Written in Javascript -->
+<script>
+
+// ============================================================
+// initShaders: Compiles and links vertex/fragment shaders
+// (Same pattern used in class examples)
+// ============================================================
+function initShaders( gl, vertexShaderId, fragmentShaderId )
+{
+    var vertShdr;
+    var fragShdr;
+
+    var vertElem = document.getElementById( vertexShaderId );
+    if ( !vertElem ) {
+        alert( "Unable to load vertex shader " + vertexShaderId );
+        return -1;
+    }
+    else {
+        vertShdr = gl.createShader( gl.VERTEX_SHADER );
+        gl.shaderSource( vertShdr, vertElem.textContent.replace(/^\s+|\s+$/g, '' ));
+        gl.compileShader( vertShdr );
+        if ( !gl.getShaderParameter(vertShdr, gl.COMPILE_STATUS) ) {
+            var msg = "Vertex shader failed to compile.  The error log is:"
+        	+ "<pre>" + gl.getShaderInfoLog( vertShdr ) + "</pre>";
+            alert( msg );
+            return -1;
+        }
+    }
+
+    var fragElem = document.getElementById( fragmentShaderId );
+    if ( !fragElem ) {
+        alert( "Unable to load fragment shader " + fragmentShaderId );
+        return -1;
+    }
+    else {
+        fragShdr = gl.createShader( gl.FRAGMENT_SHADER );
+        gl.shaderSource( fragShdr, fragElem.textContent.replace(/^\s+|\s+$/g, '' ) );
+        gl.compileShader( fragShdr );
+        if ( !gl.getShaderParameter(fragShdr, gl.COMPILE_STATUS) ) {
+            var msg = "Fragment shader failed to compile.  The error log is:"
+        	+ "<pre>" + gl.getShaderInfoLog( fragShdr ) + "</pre>";
+            alert( msg );
+            return -1;
+        }
+    }
+
+    var program = gl.createProgram();
+    gl.attachShader( program, vertShdr );
+    gl.attachShader( program, fragShdr );
+    gl.linkProgram( program );
+
+    if ( !gl.getProgramParameter(program, gl.LINK_STATUS) ) {
+        var msg = "Shader program failed to link.  The error log is:"
+            + "<pre>" + gl.getProgramInfoLog( program ) + "</pre>";
+        alert( msg );
+        return -1;
+    }
+
+    return program;
+}
+
+
+// ============================================================
+// HSL to RGB conversion for smooth color cycling
+// h: hue [0, 1], s: saturation [0, 1], l: lightness [0, 1]
+// Returns [r, g, b] each in [0, 1]
+// ============================================================
+function hslToRgb(h, s, l)
+{
+    var r, g, b;
+
+    if (s === 0) {
+        r = g = b = l;
+    } else {
+        function hue2rgb(p, q, t) {
+            if (t < 0) t += 1;
+            if (t > 1) t -= 1;
+            if (t < 1/6) return p + (q - p) * 6 * t;
+            if (t < 1/2) return q;
+            if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+            return p;
+        }
+        var q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        var p = 2 * l - q;
+        r = hue2rgb(p, q, h + 1/3);
+        g = hue2rgb(p, q, h);
+        b = hue2rgb(p, q, h - 1/3);
+    }
+
+    return [r, g, b];
+}
+
+
+// ============================================================
+// Global variables
+// ============================================================
+var gl;
+var program;
+
+// Uniform locations (looked up once at init, reused in render loop)
+var uOffsetX_Loc;
+var uOffsetY_Loc;
+var uPointSize_Loc;
+var uColor_Loc;
+
+// Animation state
+var speed = 0.0012;         // Default speed (controlled by slider)
+var pointSize = 3.0;        // Default point size
+var theta = 0.0;            // Parametric angle (accumulated over frames)
+
+
+// ============================================================
+// Initialization: Runs once when the page loads
+// ============================================================
+window.onload = function init()
+{
+    var canvas = document.getElementById( "gl-canvas" );
+
+    // Create WebGL 2.0 context WITH preserveDrawingBuffer
+    // This prevents the browser from clearing the canvas each frame,
+    // allowing the path trace to remain visible
+    gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true });
+    if (!gl) { alert( "WebGL 2.0 isn't available" ); }
+
+    // Compile and link shaders
+    program = initShaders( gl, "vertex-shader", "fragment-shader" );
+    gl.useProgram( program );
+
+    // Look up uniform locations ONCE at initialization (not in render loop)
+    uOffsetX_Loc    = gl.getUniformLocation(program, "uOffsetX");
+    uOffsetY_Loc    = gl.getUniformLocation(program, "uOffsetY");
+    uPointSize_Loc  = gl.getUniformLocation(program, "uPointSize");
+    uColor_Loc      = gl.getUniformLocation(program, "uColor");
+
+    // Set background color (dark navy) and clear once
+    gl.clearColor(0.05, 0.02, 0.12, 1.0);
+    gl.clear( gl.COLOR_BUFFER_BIT );
+
+    // ---- UI Event Listeners (set up once at init) ----
+
+    // Speed slider
+    document.getElementById("speedSlider").oninput = function(event) {
+        speed = parseFloat(event.target.value);
+    };
+
+    // Point size slider
+    document.getElementById("sizeSlider").oninput = function(event) {
+        pointSize = parseFloat(event.target.value);
+    };
+
+    // Clear button: clears canvas then continues drawing
+    document.getElementById("clearBtn").onclick = function() {
+        gl.clear( gl.COLOR_BUFFER_BIT );
+    };
+
+    // Start the animation loop
+    render();
+};
+
+
+// ============================================================
+// Render loop: Called each frame via requestAnimationFrame
+// ============================================================
+function render()
+{
+    // NOTE: We do NOT call gl.clear() here — preserveDrawingBuffer keeps the trace
+
+    // ---- Parametric Equation: Butterfly Curve (modified) ----
+    // This is a variation of the butterfly curve that crosses itself.
+    //
+    //   r = e^sin(theta) - 2*cos(4*theta) + sin^5((2*theta - pi)/24)
+    //
+    // Mapped to XY and scaled so it fits within [-1, 1] clip space:
+    //   x(theta) = 0.22 * r * sin(theta)
+    //   y(theta) = 0.22 * r * cos(theta)
+
+    // Advance the parametric angle based on speed
+    theta += speed * 16.0;   // scale for smooth visible motion
+
+    // Compute the butterfly curve radius
+    var r = Math.exp(Math.sin(theta))
+          - 2.0 * Math.cos(4.0 * theta)
+          + Math.pow( Math.sin((2.0 * theta - Math.PI) / 24.0), 5.0 );
+
+    // Map to XY using polar-to-cartesian, scaled to fit clip space [-1, 1]
+    var scale = 0.22;
+    var x = scale * r * Math.sin(theta);
+    var y = scale * r * Math.cos(theta);
+
+    // Clamp to clip space just in case
+    x = Math.max(-1.0, Math.min(1.0, x));
+    y = Math.max(-1.0, Math.min(1.0, y));
+
+    // ---- Color: Smooth HSL cycling based on theta ----
+    var hue = (theta * 0.03) % 1.0;            // Slowly cycle through hues
+    var rgb = hslToRgb(hue, 0.95, 0.55);       // Vivid, saturated colors
+
+    // ---- Send uniform values to the GPU ----
+    gl.uniform1f(uOffsetX_Loc, x);
+    gl.uniform1f(uOffsetY_Loc, y);
+    gl.uniform1f(uPointSize_Loc, pointSize);
+    gl.uniform4f(uColor_Loc, rgb[0], rgb[1], rgb[2], 1.0);
+
+    // Draw a single point at the offset position
+    gl.drawArrays( gl.POINTS, 0, 1 );
+
+    // Request next frame
+    requestAnimationFrame(render);
+}
+
+</script>
+
+</html>
