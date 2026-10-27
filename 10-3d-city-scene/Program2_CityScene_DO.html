@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Program 2 - 3D City Scene</title>
+<style>
+    body {
+        background-color: #2e1a1a;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        font-family: Arial, sans-serif;
+        color: #e0e0e0;
+        margin: 20px;
+    }
+    h2 { margin-bottom: 5px; color: #ffffff; }
+    canvas {
+        border: 2px solid #444;
+        margin: 10px;
+    }
+    .controls {
+        margin: 10px;
+        text-align: center;
+    }
+    .controls button {
+        padding: 6px 14px;
+        margin: 3px;
+        cursor: pointer;
+        background: #333;
+        color: #eee;
+        border: 1px solid #666;
+        border-radius: 4px;
+    }
+    .controls button:hover { background: #555; }
+    .controls div { margin: 6px 0; }
+    .controls input[type="range"] { width: 200px; vertical-align: middle; }
+</style>
+</head>
+
+<!-- ============================================================ -->
+<!-- VERTEX SHADER SOURCE CODE: Written in GLSL ES 3.0            -->
+<!-- ============================================================ -->
+<script id="vertex-shader" type="x-shader/x-vertex">
+#version 300 es
+
+in vec4 aPosition;
+in vec4 aColor;
+out vec4 vColor;
+
+uniform mat4 uModelMatrix;
+uniform mat4 uViewMatrix;
+uniform mat4 uProjectionMatrix;
+
+void main()
+{
+    // -------------------------------------------------------
+    // PROJECTION PIPELINE:
+    // gl_Position = Projection * View * Model * vertex
+    // The projection matrix converts the 3D viewing volume
+    // into normalized device coordinates (clip space).
+    // -------------------------------------------------------
+    gl_Position = uProjectionMatrix * uViewMatrix * uModelMatrix * aPosition;
+    vColor = aColor;
+}
+</script>
+
+<!-- ============================================================ -->
+<!-- FRAGMENT SHADER SOURCE CODE: Written in GLSL ES 3.0          -->
+<!-- ============================================================ -->
+<script id="fragment-shader" type="x-shader/x-fragment">
+#version 300 es
+
+precision mediump float;
+
+in vec4 vColor;
+out vec4 fColor;
+
+void main()
+{
+    fColor = vColor;
+}
+</script>
+
+<!-- Load initShaders utility -->
+<script type="text/javascript" src="initShaders.js"></script>
+
+<body>
+<h2>Program 2 &mdash; 3D City Scene</h2>
+
+<canvas id="gl-canvas" width="640" height="480">
+    Oops ... your browser doesn't support the HTML5 canvas element
+</canvas>
+
+<div class="controls">
+    <div>
+        Rotate Y-Axis <input id="sliderTheta" type="range"
+         min="0" max="360" step="1" value="40" />
+    </div>
+    <div>
+        Rotate X-Axis <input id="sliderPhi" type="range"
+         min="5" max="85" step="1" value="26" />
+    </div>
+    <div>
+        Zoom <input id="sliderZoom" type="range"
+         min="5" max="25" step="1" value="18" />
+    </div>
+    <br/>
+    <button id="btnReset">Reset Camera</button>
+    <button id="btnToggleSpin">Toggle Auto-Spin</button>
+</div>
+
+<!-- ============================================================ -->
+<!-- MAIN JAVASCRIPT: City Scene Logic                            -->
+<!-- ============================================================ -->
+<script>
+"use strict";
+
+// ----------------------------------------------------------------
+// Global variables
+// ----------------------------------------------------------------
+var canvas;
+var gl;
+var program;
+
+// Uniform locations
+var uModelMatrixLoc;
+var uViewMatrixLoc;
+var uProjectionMatrixLoc;
+
+// Camera / orbit parameters
+var camTheta = 0.70;         // Y-axis orbit angle (radians) ~40 degrees
+var camPhi = 0.45;           // X-axis elevation angle (radians) ~26 degrees
+var camRadius = 18.0;        // Distance from target (pulled back for full skyline)
+var camTarget = [0.0, 1.5, 0.5]; // Look-at target (raised slightly to center skyline)
+var autoSpin = false;        // Start with spin off
+
+// Cube geometry (36 vertices for 12 triangles = 6 faces)
+var numVertices = 36;
+
+// ----------------------------------------------------------------
+// Unit cube face data: positions and colors
+// Each face is 2 triangles (6 vertices) with a distinct color
+// ----------------------------------------------------------------
+var cubePositions = [];
+var cubeColors = [];
+
+// The 8 corners of a unit cube centered at origin
+var cubeCorners = [
+    [-0.5, -0.5,  0.5],   // 0: front-bottom-left
+    [ 0.5, -0.5,  0.5],   // 1: front-bottom-right
+    [ 0.5,  0.5,  0.5],   // 2: front-top-right
+    [-0.5,  0.5,  0.5],   // 3: front-top-left
+    [-0.5, -0.5, -0.5],   // 4: back-bottom-left
+    [ 0.5, -0.5, -0.5],   // 5: back-bottom-right
+    [ 0.5,  0.5, -0.5],   // 6: back-top-right
+    [-0.5,  0.5, -0.5]    // 7: back-top-left
+];
+
+// Face colors (one per face) - muted building tones
+var faceColors = [
+    [0.75, 0.75, 0.80, 1.0],  // Front  - light gray-blue
+    [0.60, 0.60, 0.65, 1.0],  // Back   - medium gray
+    [0.85, 0.85, 0.88, 1.0],  // Top    - bright gray
+    [0.40, 0.40, 0.45, 1.0],  // Bottom - dark gray
+    [0.70, 0.70, 0.75, 1.0],  // Right  - gray
+    [0.55, 0.55, 0.60, 1.0]   // Left   - darker gray
+];
+
+// Face index definitions (which corners form each face)
+var faceIndices = [
+    [0, 1, 2, 0, 2, 3],   // Front
+    [5, 4, 7, 5, 7, 6],   // Back
+    [3, 2, 6, 3, 6, 7],   // Top
+    [4, 5, 1, 4, 1, 0],   // Bottom
+    [1, 5, 6, 1, 6, 2],   // Right
+    [4, 0, 3, 4, 3, 7]    // Left
+];
+
+function buildCube() {
+    cubePositions = [];
+    cubeColors = [];
+    for (var f = 0; f < 6; f++) {
+        for (var v = 0; v < 6; v++) {
+            var ci = faceIndices[f][v];
+            cubePositions.push(cubeCorners[ci][0], cubeCorners[ci][1], cubeCorners[ci][2]);
+            cubeColors.push(faceColors[f][0], faceColors[f][1], faceColors[f][2], faceColors[f][3]);
+        }
+    }
+}
+
+// ================================================================
+// BUILDING DEFINITIONS: 11 cube instances
+// Each building: [translateX, translateY, translateZ, scaleX, scaleY, scaleZ, colorTint]
+// translateY is set so buildings sit on the ground (y=0 plane)
+// colorTint multiplies the base face colors for variety
+// ================================================================
+var buildings = [
+    // --- Row 1 (front row, negative Z) ---
+    { tx: -4.0, sy: 4.0,  tz: -2.0, sx: 1.2, sz: 1.2, tint: [0.6, 0.7, 0.9] },   // Tall blue
+    { tx: -1.5, sy: 2.5,  tz: -2.5, sx: 1.5, sz: 1.0, tint: [0.9, 0.8, 0.6] },   // Medium tan
+    { tx:  1.0, sy: 5.5,  tz: -1.5, sx: 1.0, sz: 1.0, tint: [0.7, 0.75, 0.85] }, // Tallest steel
+    { tx:  3.5, sy: 3.0,  tz: -2.0, sx: 1.3, sz: 1.3, tint: [0.85, 0.7, 0.65] }, // Med brick
+
+    // --- Row 2 (middle row) ---
+    { tx: -3.0, sy: 6.0,  tz:  1.0, sx: 1.0, sz: 1.0, tint: [0.5, 0.6, 0.8] },   // Very tall blue
+    { tx:  0.0, sy: 3.5,  tz:  0.5, sx: 1.8, sz: 1.5, tint: [0.8, 0.8, 0.75] },  // Wide office
+    { tx:  3.0, sy: 2.0,  tz:  1.0, sx: 1.0, sz: 2.0, tint: [0.75, 0.65, 0.6] }, // Low long
+
+    // --- Row 3 (back row, positive Z) ---
+    { tx: -4.5, sy: 3.5,  tz:  4.0, sx: 1.2, sz: 1.2, tint: [0.7, 0.8, 0.7] },   // Green glass
+    { tx: -1.0, sy: 7.0,  tz:  3.5, sx: 0.9, sz: 0.9, tint: [0.6, 0.65, 0.8] },  // Skyscraper
+    { tx:  2.0, sy: 4.5,  tz:  4.0, sx: 1.4, sz: 1.0, tint: [0.9, 0.75, 0.7] },  // Coral tower
+    { tx:  4.5, sy: 1.5,  tz:  3.5, sx: 2.0, sz: 1.5, tint: [0.8, 0.8, 0.65] }   // Low wide
+];
+// Total: 11 building instances
+
+// ================================================================
+// MATH UTILITY FUNCTIONS
+// (Manual implementations for perspective projection and lookAt)
+// ================================================================
+
+// Creates a 4x4 identity matrix (column-major flat array)
+function mat4Identity() {
+    return new Float32Array([
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1
+    ]);
+}
+
+// ----------------------------------------------------------------
+// PERSPECTIVE PROJECTION MATRIX
+// Parameters:
+//   fovy   - vertical field of view in degrees
+//   aspect - width / height ratio of the canvas
+//   near   - distance to the near clipping plane (must be > 0)
+//   far    - distance to the far clipping plane
+//
+// This defines the VIEWING VOLUME as a frustum. Objects inside
+// this frustum are visible; objects outside are clipped.
+// The perspective divide (w-divide) causes distant objects to
+// appear smaller, creating depth perception.
+// ----------------------------------------------------------------
+function perspectiveMatrix(fovy, aspect, near, far) {
+    var f = 1.0 / Math.tan(fovy * Math.PI / 360.0);  // cot(fovy/2)
+    var rangeInv = 1.0 / (near - far);
+
+    // Column-major 4x4 matrix
+    return new Float32Array([
+        f / aspect, 0,  0,                          0,
+        0,          f,  0,                          0,
+        0,          0,  (near + far) * rangeInv,   -1,
+        0,          0,  near * far * rangeInv * 2,  0
+    ]);
+}
+
+// ----------------------------------------------------------------
+// LOOK-AT VIEW MATRIX
+// Parameters:
+//   eye - camera position [x, y, z]
+//   at  - target point the camera looks at [x, y, z]
+//   up  - world up direction [x, y, z]
+//
+// This positions and orients the camera in the scene.
+// Combined with the projection matrix, it defines what
+// portion of the 3D world maps to the 2D screen.
+// ----------------------------------------------------------------
+function lookAtMatrix(eye, at, up) {
+    var zAxis = normalize(subtractVec3(eye, at));
+    var xAxis = normalize(crossVec3(up, zAxis));
+    var yAxis = crossVec3(zAxis, xAxis);
+
+    // Column-major 4x4 matrix
+    return new Float32Array([
+        xAxis[0], yAxis[0], zAxis[0], 0,
+        xAxis[1], yAxis[1], zAxis[1], 0,
+        xAxis[2], yAxis[2], zAxis[2], 0,
+        -dotVec3(xAxis, eye), -dotVec3(yAxis, eye), -dotVec3(zAxis, eye), 1
+    ]);
+}
+
+// MODEL MATRIX: Scale then Translate (column-major)
+function modelMatrix(tx, ty, tz, sx, sy, sz) {
+    return new Float32Array([
+        sx,  0,   0,  0,
+        0,   sy,  0,  0,
+        0,   0,   sz, 0,
+        tx,  ty,  tz, 1
+    ]);
+}
+
+// --- Vector3 helpers ---
+function subtractVec3(a, b) { return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]; }
+function crossVec3(a, b) {
+    return [
+        a[1]*b[2] - a[2]*b[1],
+        a[2]*b[0] - a[0]*b[2],
+        a[0]*b[1] - a[1]*b[0]
+    ];
+}
+function dotVec3(a, b) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
+function normalize(v) {
+    var len = Math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+    if (len === 0) return [0, 0, 0];
+    return [v[0]/len, v[1]/len, v[2]/len];
+}
+
+// ================================================================
+// INITIALIZATION
+// ================================================================
+window.onload = function init()
+{
+    canvas = document.getElementById("gl-canvas");
+
+    gl = canvas.getContext('webgl2');
+    if (!gl) alert("WebGL 2.0 isn't available");
+
+    gl.viewport(0, 0, canvas.width, canvas.height);
+
+    // Build the unit cube geometry
+    buildCube();
+
+    // -------------------------------------------------------
+    // Load shaders and initialize attribute buffers
+    // -------------------------------------------------------
+    program = initShaders(gl, "vertex-shader", "fragment-shader");
+    gl.useProgram(program);
+
+    // --- Vertex position buffer ---
+    var vBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(cubePositions), gl.STATIC_DRAW);
+
+    var positionLoc = gl.getAttribLocation(program, "aPosition");
+    gl.vertexAttribPointer(positionLoc, 3, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(positionLoc);
+
+    // --- Vertex color buffer ---
+    var cBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, cBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(cubeColors), gl.STATIC_DRAW);
+
+    var colorLoc = gl.getAttribLocation(program, "aColor");
+    gl.vertexAttribPointer(colorLoc, 4, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(colorLoc);
+
+    // --- Get uniform locations ---
+    uModelMatrixLoc = gl.getUniformLocation(program, "uModelMatrix");
+    uViewMatrixLoc = gl.getUniformLocation(program, "uViewMatrix");
+    uProjectionMatrixLoc = gl.getUniformLocation(program, "uProjectionMatrix");
+
+    // -------------------------------------------------------
+    // PERSPECTIVE PROJECTION SETUP
+    //
+    // Field of view:  45 degrees (vertical)
+    // Aspect ratio:   canvas width / height
+    // Near plane:     0.1 units from camera
+    // Far plane:      100.0 units from camera
+    //
+    // These parameters define the viewing volume (frustum).
+    // The near/far planes clip geometry that is too close
+    // or too far from the camera.
+    // -------------------------------------------------------
+    var aspect = canvas.width / canvas.height;
+    var projMatrix = perspectiveMatrix(45.0, aspect, 0.1, 100.0);
+    gl.uniformMatrix4fv(uProjectionMatrixLoc, false, projMatrix);
+
+    // -------------------------------------------------------
+    // Event listeners for sliders
+    // -------------------------------------------------------
+
+    // Orbit slider (Y-axis rotation)
+    document.getElementById("sliderTheta").oninput = function(event) {
+        camTheta = (Math.PI / 180.0) * event.target.value;
+        autoSpin = false;
+    };
+
+    // Elevation slider (X-axis rotation)
+    document.getElementById("sliderPhi").oninput = function(event) {
+        camPhi = (Math.PI / 180.0) * event.target.value;
+    };
+
+    // Zoom slider (camera distance)
+    document.getElementById("sliderZoom").oninput = function(event) {
+        camRadius = parseFloat(event.target.value);
+    };
+
+    // Buttons
+    document.getElementById("btnReset").onclick = function() {
+        camTheta = 0.70;
+        camPhi = 0.45;
+        camRadius = 18.0;
+        autoSpin = false;
+        document.getElementById("sliderTheta").value = 40;
+        document.getElementById("sliderPhi").value = 26;
+        document.getElementById("sliderZoom").value = 18;
+    };
+    document.getElementById("btnToggleSpin").onclick = function() {
+        autoSpin = !autoSpin;
+    };
+
+    // -------------------------------------------------------
+    // WebGL configuration
+    // -------------------------------------------------------
+    gl.clearColor(0.55, 0.35, 0.45, 1.0);  // Warm dusk/sunset sky
+    gl.enable(gl.DEPTH_TEST);
+
+    render();
+};
+
+// ================================================================
+// RENDER LOOP
+// ================================================================
+function render()
+{
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    // Auto-spin camera if enabled
+    if (autoSpin) {
+        camTheta += 0.004;
+        // Keep slider in sync with auto-spin
+        var deg = Math.round((camTheta * 180.0 / Math.PI) % 360);
+        if (deg < 0) deg += 360;
+        document.getElementById("sliderTheta").value = deg;
+    }
+
+    // -------------------------------------------------------
+    // VIEW MATRIX (Camera)
+    // Compute eye position from spherical coordinates,
+    // then build the lookAt matrix.
+    // -------------------------------------------------------
+    var eyeX = camTarget[0] + camRadius * Math.sin(camPhi) * Math.cos(camTheta);
+    var eyeY = camTarget[1] + camRadius * Math.cos(camPhi);
+    var eyeZ = camTarget[2] + camRadius * Math.sin(camPhi) * Math.sin(camTheta);
+    var eye = [eyeX, eyeY, eyeZ];
+
+    var viewMatrix = lookAtMatrix(eye, camTarget, [0, 1, 0]);
+    gl.uniformMatrix4fv(uViewMatrixLoc, false, viewMatrix);
+
+    // -------------------------------------------------------
+    // Draw ground plane (a flat, wide cube)
+    // -------------------------------------------------------
+    var groundModel = modelMatrix(0.0, -0.05, 0.5, 14.0, 0.1, 12.0);
+    gl.uniformMatrix4fv(uModelMatrixLoc, false, groundModel);
+
+    // Temporarily override colors for green ground
+    var groundColors = [];
+    for (var i = 0; i < numVertices; i++) {
+        groundColors.push(0.25, 0.3, 0.2, 1.0);
+    }
+    var cBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, cBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(groundColors), gl.STATIC_DRAW);
+    var colorLoc = gl.getAttribLocation(program, "aColor");
+    gl.vertexAttribPointer(colorLoc, 4, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(colorLoc);
+
+    gl.drawArrays(gl.TRIANGLES, 0, numVertices);
+
+    // -------------------------------------------------------
+    // Draw 11 building instances
+    // Each uses the SAME unit cube mesh, scaled and translated
+    // via the model matrix to create variety.
+    // -------------------------------------------------------
+    for (var b = 0; b < buildings.length; b++) {
+        var bld = buildings[b];
+
+        // Position the building so its base sits on y=0
+        var ty = bld.sy / 2.0;
+        var mdl = modelMatrix(bld.tx, ty, bld.tz, bld.sx, bld.sy, bld.sz);
+        gl.uniformMatrix4fv(uModelMatrixLoc, false, mdl);
+
+        // Tint the base face colors for this building
+        var tintedColors = [];
+        for (var v = 0; v < numVertices; v++) {
+            var baseR = cubeColors[v * 4 + 0];
+            var baseG = cubeColors[v * 4 + 1];
+            var baseB = cubeColors[v * 4 + 2];
+            tintedColors.push(
+                baseR * bld.tint[0],
+                baseG * bld.tint[1],
+                baseB * bld.tint[2],
+                1.0
+            );
+        }
+
+        var bColorBuf = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, bColorBuf);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(tintedColors), gl.STATIC_DRAW);
+        gl.vertexAttribPointer(colorLoc, 4, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(colorLoc);
+
+        gl.drawArrays(gl.TRIANGLES, 0, numVertices);
+    }
+
+    requestAnimationFrame(render);
+}
+</script>
+</body>
+</html>
