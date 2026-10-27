@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CG Program 1 - Daniel Oni - 3D Logo "DO"</title>
+</head>
+
+<!-- ========================================================================
+     VERTEX SHADER SOURCE CODE: Written in GLSL
+
+     Applies 3D rotation matrices (Rx, Ry, Rz) for scene viewing,
+     plus an extra Y-rotation for letter auto-rotate on the pedestal.
+     Matrix construction follows class pattern from Ex_02_4 and 3D Viewer.
+     All matrices in COLUMN MAJOR order as required by GLSL.
+     ======================================================================== -->
+<script id="vertex-shader" type="x-shader/x-vertex">
+#version 300 es
+
+in vec4 aPosition;      // Vertex position in homogeneous coordinates (x, y, z, w)
+in vec4 aColor;          // Vertex color (r, g, b passed in, a defaults to 1)
+out vec4 vColor;         // Pass color to fragment shader
+
+uniform float uThetaX;       // Rotation about X-axis (tilt view up/down)
+uniform float uThetaY;       // Rotation about Y-axis (turn view left/right)
+uniform float uThetaZ;       // Rotation about Z-axis
+uniform float uExtraThetaY;  // Extra Y-rotation for letter auto-rotate
+uniform float uTime;         // Time value for confetti animation
+uniform float uConfettiAnim; // 1.0 = apply confetti animation, 0.0 = normal
+
+void main()
+{
+    // Construct rotation matrix about X-axis (COLUMN MAJOR)
+    mat4 rx = mat4(
+        1.0,  0.0,           0.0,          0.0,
+        0.0,  cos(uThetaX),  sin(uThetaX), 0.0,
+        0.0, -sin(uThetaX),  cos(uThetaX), 0.0,
+        0.0,  0.0,           0.0,          1.0);
+
+    // Construct rotation matrix about Y-axis (COLUMN MAJOR)
+    mat4 ry = mat4(
+        cos(uThetaY), 0.0, -sin(uThetaY), 0.0,
+        0.0,          1.0,  0.0,           0.0,
+        sin(uThetaY), 0.0,  cos(uThetaY), 0.0,
+        0.0,          0.0,  0.0,           1.0);
+
+    // Construct rotation matrix about Z-axis (COLUMN MAJOR)
+    mat4 rz = mat4(
+        cos(uThetaZ),  sin(uThetaZ), 0.0, 0.0,
+       -sin(uThetaZ),  cos(uThetaZ), 0.0, 0.0,
+        0.0,            0.0,          1.0, 0.0,
+        0.0,            0.0,          0.0, 1.0);
+
+    // Extra Y-rotation for letters spinning on the pedestal
+    mat4 ryExtra = mat4(
+        cos(uExtraThetaY), 0.0, -sin(uExtraThetaY), 0.0,
+        0.0,               1.0,  0.0,                0.0,
+        sin(uExtraThetaY), 0.0,  cos(uExtraThetaY), 0.0,
+        0.0,               0.0,  0.0,                1.0);
+
+    // Apply confetti animation if enabled:
+    // Makes each piece fall and drift using its own position as a seed
+    vec4 pos = aPosition;
+    if (uConfettiAnim > 0.5) {
+        float seed = pos.x * 137.0 + pos.z * 251.0; // unique per piece
+        float fallSpeed = 0.3 + 0.2 * sin(seed);     // slightly different speed each
+        float driftX = 0.08 * sin(uTime * 1.5 + seed);
+        float driftZ = 0.06 * cos(uTime * 1.8 + seed * 0.7);
+
+        // Fall downward and wrap back to top when it goes below -0.8
+        float y = pos.y - mod(uTime * fallSpeed, 1.6);
+        if (y < -0.8) y += 1.6;
+
+        pos.x += driftX;
+        pos.y = y;
+        pos.z += driftZ;
+    }
+
+    // Apply: scene rotation * letter rotation * position
+    // Scene rotation (Rx * Ry) changes the viewpoint.
+    // Extra Ry rotates letters on the pedestal while pedestal stays still.
+    gl_Position = rx * ry * rz * ryExtra * pos;
+
+    vColor = aColor;
+    gl_PointSize = 5.0;
+}
+</script>
+
+<!-- ========================================================================
+     FRAGMENT SHADER SOURCE CODE: Written in GLSL
+     Passes through the interpolated vertex color.
+     ======================================================================== -->
+<script id="fragment-shader" type="x-shader/x-fragment">
+#version 300 es
+precision mediump float;
+
+in vec4 vColor;
+out vec4 fColor;
+
+void main()
+{
+    fColor = vColor;
+}
+</script>
+
+
+<!-- ========================================================================
+     HTML UI Layout
+     ======================================================================== -->
+<style>
+    body {
+        background-color: #1a1a2e;
+        color: #e0e0e0;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        margin: 20px;
+    }
+    h1 {
+        color: #ffd700;
+        margin-bottom: 5px;
+        font-size: 1.4em;
+    }
+    h2 {
+        color: #aaa;
+        font-size: 0.9em;
+        margin-top: 0;
+        font-weight: normal;
+    }
+    canvas {
+        border: 2px solid #444;
+        border-radius: 4px;
+    }
+    .controls {
+        margin-top: 15px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+        width: 520px;
+    }
+    .control-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        justify-content: center;
+    }
+    .control-row label {
+        min-width: 130px;
+        text-align: right;
+        font-size: 0.9em;
+    }
+    input[type="range"] {
+        width: 220px;
+        cursor: pointer;
+    }
+    .button-row {
+        display: flex;
+        gap: 12px;
+        margin-top: 5px;
+    }
+    button {
+        padding: 8px 18px;
+        border: 1px solid #555;
+        border-radius: 4px;
+        background-color: #2a2a4a;
+        color: #e0e0e0;
+        cursor: pointer;
+        font-size: 0.85em;
+        transition: background-color 0.2s;
+    }
+    button:hover {
+        background-color: #3a3a6a;
+    }
+    button.active {
+        background-color: #5a4a00;
+        border-color: #ffd700;
+        color: #ffd700;
+    }
+    select {
+        padding: 6px 12px;
+        border: 1px solid #555;
+        border-radius: 4px;
+        background-color: #2a2a4a;
+        color: #e0e0e0;
+        font-size: 0.85em;
+        cursor: pointer;
+    }
+    .theme-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+</style>
+
+<body>
+
+<h1>3D Logo &mdash; Daniel Oni</h1>
+<h2>CS 5382 Computer Graphics &bull; Program 1</h2>
+
+<canvas id="gl-canvas" width="512" height="512"></canvas>
+
+<div class="controls">
+
+    <!-- INTERACTION 1: Sliders for 3D view rotation -->
+    <div class="control-row">
+        <label for="RotateX">Tilt (X-Axis):</label>
+        <input id="RotateX" type="range"
+            min="-90" max="90" step="1" value="-17" />
+    </div>
+
+    <div class="control-row">
+        <label for="RotateY">Turn (Y-Axis):</label>
+        <input id="RotateY" type="range"
+            min="-180" max="180" step="1" value="23" />
+    </div>
+
+    <!-- INTERACTION 2: Buttons for toggling effects -->
+    <div class="button-row">
+        <button id="btnAutoRotate" class="active">Stop Rotation</button>
+        <button id="btnConfetti">Show Confetti</button>
+    </div>
+
+    <!-- INTERACTION 3: Dropdown menu for color themes -->
+    <div class="theme-row">
+        <label for="themeSelect">Color Theme:</label>
+        <select id="themeSelect">
+            <option value="gold">Gold &amp; Bronze</option>
+            <option value="ocean">Ocean Blue</option>
+            <option value="forest">Forest Green</option>
+            <option value="neon">Neon Glow</option>
+        </select>
+    </div>
+
+</div>
+
+</body>
+
+<!-- Load the separate JavaScript file -->
+<script src="CG_Program1_OniDaniel.js"></script>
+
+</html>
