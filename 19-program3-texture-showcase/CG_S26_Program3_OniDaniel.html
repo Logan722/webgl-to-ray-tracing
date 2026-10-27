@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>CG_S26_Program3 - Texture Showcase</title>
+<style>
+    body { font-family: sans-serif; margin: 16px; background: #f4f4f0; color: #222; }
+    h2 { margin-bottom: 6px; }
+    #gl-canvas { border: 1px solid #888; background: #000; display: block; }
+    .controls { margin-top: 10px; max-width: 720px; }
+    .row { margin: 6px 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .row label { min-width: 130px; font-size: 14px; }
+    .row input[type=range] { width: 220px; }
+    .group { border: 1px solid #ccc; padding: 8px 10px; margin-top: 8px; background: #fff; }
+    .group h4 { margin: 0 0 6px 0; font-size: 14px; }
+    .note { font-size: 12px; color: #555; margin-top: 6px; }
+</style>
+</head>
+<body>
+
+<h2>CG_S26 Program 3 - Texture Showcase</h2>
+<div class="note">Reflective sphere (cube map), mode-switching cube (image / wood / webcam with effects), procedural brick platform. Phong-lit, slider orbit camera.</div>
+
+<canvas id="gl-canvas" width="720" height="540"></canvas>
+
+<!-- Hidden video element used as the webcam texture source -->
+<video id="webcamVideo" autoplay playsinline style="display:none;"></video>
+
+<!-- =====================================================================
+     VERTEX SHADER
+     One vertex shader is used by both programs. It produces:
+       - eye-space N, L, E for Phong lighting
+       - world-space position and normal for cube-map reflection
+       - texture coordinates for image / procedural / webcam modes
+===================================================================== -->
+<script id="vertex-shader" type="x-shader/x-vertex">
+#version 300 es
+
+in vec4 aPosition;
+in vec4 aNormal;
+in vec2 aTexCoord;
+
+out vec3 vN, vL, vE;
+out vec3 vWorldPos;
+out vec3 vWorldNormal;
+out vec2 vTexCoord;
+
+uniform mat4 uModelMatrix;
+uniform mat4 uViewMatrix;
+uniform mat4 uProjectionMatrix;
+uniform mat3 uNormalMatrix;
+uniform mat3 uWorldNormalMatrix;
+uniform vec4 uLightPosition;
+
+void main()
+{
+    // World-space position and normal (used for env-map reflection)
+    vec4 worldPos4 = uModelMatrix * aPosition;
+    vWorldPos = worldPos4.xyz;
+    vWorldNormal = normalize(uWorldNormalMatrix * aNormal.xyz);
+
+    // Eye-space position (for Phong)
+    vec4 eyePos4 = uViewMatrix * worldPos4;
+    vec3 eyePos = eyePos4.xyz;
+
+    // Light vector L (eye space). Directional if w == 0, point otherwise.
+    if (uLightPosition.w == 0.0) {
+        vL = normalize((uViewMatrix * uLightPosition).xyz);
+    } else {
+        vec3 lightEye = (uViewMatrix * uLightPosition).xyz;
+        vL = normalize(lightEye - eyePos);
+    }
+
+    // Eye-direction E points from fragment toward camera (camera at origin in eye space)
+    vE = -normalize(eyePos);
+
+    // Eye-space normal for Phong
+    vN = normalize(uNormalMatrix * aNormal.xyz);
+
+    vTexCoord = aTexCoord;
+    gl_Position = uProjectionMatrix * eyePos4;
+}
+</script>
+
+<!-- =====================================================================
+     FRAGMENT SHADER - ENVIRONMENT-MAPPED SPHERE
+     Reflection vector computed in world space, sampled from cube map.
+     Phong specular highlight is added on top.
+===================================================================== -->
+<script id="fragment-shader-env" type="x-shader/x-fragment">
+#version 300 es
+precision mediump float;
+
+in vec3 vN, vL, vE;
+in vec3 vWorldPos;
+in vec3 vWorldNormal;
+
+uniform samplerCube uCubeMap;
+uniform vec3 uEyeWorld;
+uniform vec4 uAmbientProduct;
+uniform vec4 uSpecularProduct;
+uniform float uShininess;
+uniform float uReflectivity;
+
+out vec4 fColor;
+
+void main()
+{
+    // Reflection vector in world space
+    vec3 V = normalize(uEyeWorld - vWorldPos);
+    vec3 N = normalize(vWorldNormal);
+    vec3 R = reflect(-V, N);
+    vec4 envColor = texture(uCubeMap, R);
+
+    // Phong specular highlight (eye space)
+    vec3 H = normalize(vL + vE);
+    float Ks = pow(max(dot(vN, H), 0.0), uShininess);
+    vec4 specular = Ks * uSpecularProduct;
+    if (dot(vL, vN) < 0.0) specular = vec4(0.0, 0.0, 0.0, 1.0);
+
+    // Mix base ambient tint with reflection, add specular highlight
+    vec4 base = mix(uAmbientProduct, envColor, uReflectivity);
+    fColor = base + specular;
+    fColor.a = 1.0;
+}
+</script>
+
+<!-- =====================================================================
+     FRAGMENT SHADER - TEXTURED OBJECTS
+     Mode uniform selects the source color:
+       0 = uploaded image (FileReader)
+       1 = procedural wood
+       2 = webcam, no effect
+       3 = webcam, grayscale
+       4 = webcam, Sobel edge detection
+       5 = webcam, sepia
+       6 = procedural brick platform
+     All paths apply Phong lighting on top.
+===================================================================== -->
+<script id="fragment-shader-tex" type="x-shader/x-fragment">
+#version 300 es
+precision mediump float;
+
+in vec3 vN, vL, vE;
+in vec2 vTexCoord;
+
+uniform sampler2D uImage;
+uniform int uMode;
+uniform vec2 uTexel;            // 1.0 / texture size, used for Sobel
+uniform vec4 uAmbientProduct;
+uniform vec4 uDiffuseProduct;
+uniform vec4 uSpecularProduct;
+uniform float uShininess;
+
+out vec4 fColor;
+
+// ---- Procedural wood pattern ---------------------------------------------
+// Uses concentric rings around a virtual trunk plus a small noise term.
+vec3 woodColor(vec2 uv) {
+    vec2 c = uv - vec2(0.5);
+    float r = length(c) * 8.0;
+    float rings = sin(r * 6.2831 + sin(uv.y * 30.0) * 0.3) * 0.5 + 0.5;
+    float grain = fract(sin(dot(uv * 50.0, vec2(12.9898, 78.233))) * 43758.5453);
+    rings = mix(rings, rings * 0.9 + grain * 0.1, 0.4);
+    vec3 darkWood  = vec3(0.30, 0.18, 0.08);
+    vec3 lightWood = vec3(0.65, 0.45, 0.22);
+    return mix(darkWood, lightWood, rings);
+}
+
+// ---- Procedural brick pattern --------------------------------------------
+vec3 brickColor(vec2 uv) {
+    vec2 tile = vec2(8.0, 16.0);
+    vec2 p = uv * tile;
+    if (mod(floor(p.y), 2.0) < 1.0) p.x += 0.5;
+    vec2 f = fract(p);
+    float mortar = 0.07;
+    float inBrick = step(mortar, f.x) * step(mortar, f.y) *
+                    step(f.x, 1.0 - mortar) * step(f.y, 1.0 - mortar);
+    vec3 brick = vec3(0.55, 0.20, 0.15);
+    vec3 mortarColor = vec3(0.80, 0.78, 0.72);
+    float jitter = fract(sin(floor(p.y) * 13.7 + floor(p.x) * 7.3) * 91.4) * 0.15 - 0.075;
+    return mix(mortarColor, brick + vec3(jitter), inBrick);
+}
+
+// ---- Sobel edge detection on the webcam texture --------------------------
+vec3 sobelEdges(sampler2D tex, vec2 uv, vec2 texel) {
+    float tl = dot(texture(tex, uv + vec2(-texel.x,  texel.y)).rgb, vec3(0.299, 0.587, 0.114));
+    float t  = dot(texture(tex, uv + vec2( 0.0,      texel.y)).rgb, vec3(0.299, 0.587, 0.114));
+    float tr = dot(texture(tex, uv + vec2( texel.x,  texel.y)).rgb, vec3(0.299, 0.587, 0.114));
+    float l  = dot(texture(tex, uv + vec2(-texel.x,  0.0)).rgb,     vec3(0.299, 0.587, 0.114));
+    float r  = dot(texture(tex, uv + vec2( texel.x,  0.0)).rgb,     vec3(0.299, 0.587, 0.114));
+    float bl = dot(texture(tex, uv + vec2(-texel.x, -texel.y)).rgb, vec3(0.299, 0.587, 0.114));
+    float b  = dot(texture(tex, uv + vec2( 0.0,     -texel.y)).rgb, vec3(0.299, 0.587, 0.114));
+    float br = dot(texture(tex, uv + vec2( texel.x, -texel.y)).rgb, vec3(0.299, 0.587, 0.114));
+
+    float gx = -tl - 2.0*l - bl + tr + 2.0*r + br;
+    float gy =  tl + 2.0*t  + tr - bl - 2.0*b - br;
+    float mag = clamp(sqrt(gx*gx + gy*gy), 0.0, 1.0);
+    return vec3(mag);
+}
+
+// ---- Sepia tone matrix ---------------------------------------------------
+vec3 sepia(vec3 c) {
+    float r = dot(c, vec3(0.393, 0.769, 0.189));
+    float g = dot(c, vec3(0.349, 0.686, 0.168));
+    float b = dot(c, vec3(0.272, 0.534, 0.131));
+    return vec3(r, g, b);
+}
+
+void main()
+{
+    vec3 baseColor;
+
+    if (uMode == 0) {
+        // Uploaded image
+        baseColor = texture(uImage, vTexCoord).rgb;
+    } else if (uMode == 1) {
+        // Procedural wood
+        baseColor = woodColor(vTexCoord);
+    } else if (uMode == 2) {
+        // Raw webcam
+        baseColor = texture(uImage, vTexCoord).rgb;
+    } else if (uMode == 3) {
+        // Webcam grayscale (luminance weights)
+        vec3 c = texture(uImage, vTexCoord).rgb;
+        float lum = dot(c, vec3(0.299, 0.587, 0.114));
+        baseColor = vec3(lum);
+    } else if (uMode == 4) {
+        // Webcam Sobel edges
+        baseColor = sobelEdges(uImage, vTexCoord, uTexel);
+    } else if (uMode == 5) {
+        // Webcam sepia
+        baseColor = sepia(texture(uImage, vTexCoord).rgb);
+    } else {
+        // Procedural brick (platform)
+        baseColor = brickColor(vTexCoord);
+    }
+
+    // Phong on top of the textured / procedural color
+    vec3 H = normalize(vL + vE);
+    vec3 ambient = uAmbientProduct.rgb * baseColor;
+    float Kd = max(dot(vL, vN), 0.0);
+    vec3 diffuse = Kd * uDiffuseProduct.rgb * baseColor;
+    float Ks = pow(max(dot(vN, H), 0.0), uShininess);
+    vec3 specular = Ks * uSpecularProduct.rgb;
+    if (dot(vL, vN) < 0.0) specular = vec3(0.0);
+
+    fColor = vec4(ambient + diffuse + specular, 1.0);
+}
+</script>
+
+<div class="controls">
+
+    <div class="group">
+        <h4>Camera Orbit</h4>
+        <div class="row">
+            <label>Theta (horizontal)</label>
+            <input id="theta-slider" type="range" min="0" max="360" step="1" value="35">
+            <span id="theta-val">35</span> deg
+        </div>
+        <div class="row">
+            <label>Phi (vertical)</label>
+            <input id="phi-slider" type="range" min="-80" max="80" step="1" value="20">
+            <span id="phi-val">20</span> deg
+        </div>
+        <div class="row">
+            <label>Radius (zoom)</label>
+            <input id="radius-slider" type="range" min="3" max="15" step="0.1" value="7">
+            <span id="radius-val">7.0</span>
+        </div>
+    </div>
+
+    <div class="group">
+        <h4>Light Position</h4>
+        <div class="row">
+            <label>Light X</label>
+            <input id="lx-slider" type="range" min="-10" max="10" step="0.1" value="3">
+            <span id="lx-val">3.0</span>
+        </div>
+        <div class="row">
+            <label>Light Y</label>
+            <input id="ly-slider" type="range" min="-10" max="10" step="0.1" value="5">
+            <span id="ly-val">5.0</span>
+        </div>
+        <div class="row">
+            <label>Light Z</label>
+            <input id="lz-slider" type="range" min="-10" max="10" step="0.1" value="4">
+            <span id="lz-val">4.0</span>
+        </div>
+    </div>
+
+    <div class="group">
+        <h4>Cube Texture Mode</h4>
+        <div class="row">
+            <label>Mode</label>
+            <select id="mode-select">
+                <option value="image">Uploaded image</option>
+                <option value="wood">Procedural wood</option>
+                <option value="webcam" selected>Webcam</option>
+            </select>
+            <input id="file-input" type="file" accept="image/*">
+        </div>
+        <div class="row">
+            <label>Webcam effect</label>
+            <select id="effect-select">
+                <option value="none">None</option>
+                <option value="gray">Grayscale</option>
+                <option value="edges">Sobel edges</option>
+                <option value="sepia">Sepia</option>
+            </select>
+        </div>
+        <div class="note" id="webcam-status">Webcam status: starting...</div>
+    </div>
+
+    <div class="group">
+        <h4>Sphere Reflectivity</h4>
+        <div class="row">
+            <label>Reflectivity</label>
+            <input id="refl-slider" type="range" min="0" max="1" step="0.01" value="0.85">
+            <span id="refl-val">0.85</span>
+        </div>
+    </div>
+
+</div>
+
+<script src="initShaders.js"></script>
+<script src="MVnew.js"></script>
+<script src="CG_S26_Program3_OniDaniel.js"></script>
+
+</body>
+</html>
