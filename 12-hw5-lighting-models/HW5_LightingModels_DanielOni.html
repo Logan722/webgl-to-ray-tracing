@@ -1,0 +1,965 @@
+<!DOCTYPE html>
+<html>
+<!--
+    HW5: Lighting Models - Daniel Oni
+    CS 7382 Computer Graphics, Spring 2026
+
+    Demonstrates three shading models on a subdivided sphere:
+      1) Gouraud  (per-vertex Blinn-Phong)
+      2) Phong    (per-fragment Blinn-Phong)
+      3) Cook-Torrance (per-fragment PBR microfacet)
+
+    Uses multiple GPU program objects, switched via dropdown.
+    Based on shadedSphere1/shadedSphere2 examples from Shreiner-Angel Ch6.
+-->
+<head>
+<meta charset="UTF-8">
+<title>HW5 Lighting Models - Daniel Oni</title>
+<style>
+    body { font-family: Arial, sans-serif; background: #f0f0f0; margin: 20px; }
+    canvas { border: 1px solid #999; display: block; margin: 10px 0; background: #fff; }
+    .controls { margin: 8px 0; }
+    label { font-weight: bold; }
+    select, button { margin: 4px; padding: 4px 8px; }
+    .info { font-size: 13px; color: #555; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<h3>HW5: Lighting Models Demo &mdash; Daniel Oni</h3>
+
+<canvas id="gl-canvas" width="512" height="512"></canvas>
+
+<div class="controls">
+    <label for="shading-select">Shading Model: </label>
+    <select id="shading-select">
+        <option value="gouraud">Gouraud (Per-Vertex)</option>
+        <option value="phong">Phong (Per-Fragment)</option>
+        <option value="cooktorrance">Cook-Torrance (PBR)</option>
+    </select>
+</div>
+
+<div class="controls">
+    <button id="Button0">Increase R</button>
+    <button id="Button1">Decrease R</button>
+    &nbsp;
+    <button id="Button2">Increase &theta;</button>
+    <button id="Button3">Decrease &theta;</button>
+    <button id="Button4">Increase &phi;</button>
+    <button id="Button5">Decrease &phi;</button>
+    &nbsp;
+    <button id="Button6">+ Subdivisions</button>
+    <button id="Button7">&minus; Subdivisions</button>
+</div>
+
+<div class="info" id="info-text">Current: Gouraud (Per-Vertex) &bull; Subdivisions: 4</div>
+
+<!-- ============================================================
+     SHADER 1: GOURAUD  (per-vertex lighting, Blinn-Phong)
+     Based on shadedSphere1.html vertex shader from course code
+     ============================================================ -->
+<script id="vertex-shader-gouraud" type="x-shader/x-vertex">
+#version 300 es
+
+// Gouraud shading: lighting computed per-vertex in vertex shader
+// Color is interpolated across the triangle by the rasterizer
+
+in vec4 aPosition;
+in vec4 aNormal;
+
+out vec4 vColor;
+
+uniform vec4 uAmbientProduct, uDiffuseProduct, uSpecularProduct;
+uniform mat4 uModelViewMatrix;
+uniform mat4 uProjectionMatrix;
+uniform vec4 uLightPosition;
+uniform float uShininess;
+uniform mat3 uNormalMatrix;
+
+void main()
+{
+    // pos is vertex position in eye coordinates
+    vec3 pos = (uModelViewMatrix * aPosition).xyz;
+
+    // vector from vertex position to light source
+    vec3 L;
+
+    // check for directional light
+    if(uLightPosition.w == 0.0) L = normalize(uLightPosition.xyz);
+    else L = normalize( uLightPosition.xyz - pos );
+
+    // Because the eye point is at the origin
+    // the vector from the vertex position to the eye is
+    vec3 E = -normalize(pos);
+
+    // halfway vector
+    vec3 H = normalize(L + E);
+
+    // Transform vertex normal into eye coordinates
+    vec3 N = normalize( uNormalMatrix * aNormal.xyz);
+
+    // Compute terms in the illumination equation
+    vec4 ambient = uAmbientProduct;
+
+    float Kd = max( dot(L, N), 0.0 );
+    vec4 diffuse = Kd * uDiffuseProduct;
+
+    float Ks = pow( max(dot(N, H), 0.0), uShininess );
+    vec4 specular = Ks * uSpecularProduct;
+
+    if( dot(L, N) < 0.0 ) {
+        specular = vec4(0.0, 0.0, 0.0, 1.0);
+    }
+
+    gl_Position = uProjectionMatrix * uModelViewMatrix * aPosition;
+
+    vColor = ambient + diffuse + specular;
+    vColor.a = 1.0;
+}
+</script>
+
+<script id="fragment-shader-gouraud" type="x-shader/x-fragment">
+#version 300 es
+precision mediump float;
+
+// Gouraud fragment shader: simply output the interpolated color
+in vec4 vColor;
+out vec4 fColor;
+
+void main()
+{
+    fColor = vColor;
+}
+</script>
+
+
+<!-- ============================================================
+     SHADER 2: PHONG  (per-fragment lighting, Blinn-Phong)
+     Based on shadedSphere2.html from course code
+     ============================================================ -->
+<script id="vertex-shader-phong" type="x-shader/x-vertex">
+#version 300 es
+
+// Phong shading: pass vectors to fragment shader for per-pixel lighting
+in vec4 aPosition;
+in vec4 aNormal;
+out vec3 N, L, E;
+
+uniform mat4 uModelViewMatrix;
+uniform mat4 uProjectionMatrix;
+uniform vec4 uLightPosition;
+uniform mat3 uNormalMatrix;
+
+void main()
+{
+    vec3 pos = (uModelViewMatrix * aPosition).xyz;
+
+    // check for directional light
+    if(uLightPosition.w == 0.0) L = normalize(uLightPosition.xyz);
+    else L = normalize( uLightPosition.xyz - pos );
+
+    E = -normalize(pos);
+    N = normalize( uNormalMatrix * aNormal.xyz);
+
+    gl_Position = uProjectionMatrix * uModelViewMatrix * aPosition;
+}
+</script>
+
+<script id="fragment-shader-phong" type="x-shader/x-fragment">
+#version 300 es
+precision mediump float;
+
+// Phong fragment shader: full Blinn-Phong computed per-fragment
+uniform vec4 uAmbientProduct;
+uniform vec4 uDiffuseProduct;
+uniform vec4 uSpecularProduct;
+uniform float uShininess;
+
+in vec3 N, L, E;
+out vec4 fColor;
+
+void main()
+{
+    // Re-normalize interpolated vectors (they lose unit length after interpolation)
+    vec3 NN = normalize(N);
+    vec3 LL = normalize(L);
+    vec3 EE = normalize(E);
+    vec3 H = normalize( LL + EE );
+
+    vec4 ambient = uAmbientProduct;
+
+    float Kd = max( dot(LL, NN), 0.0 );
+    vec4 diffuse = Kd * uDiffuseProduct;
+
+    float Ks = pow( max(dot(NN, H), 0.0), uShininess );
+    vec4 specular = Ks * uSpecularProduct;
+
+    if( dot(LL, NN) < 0.0 ) specular = vec4(0.0, 0.0, 0.0, 1.0);
+
+    fColor = ambient + diffuse + specular;
+    fColor.a = 1.0;
+}
+</script>
+
+
+<!-- ============================================================
+     SHADER 3: COOK-TORRANCE  (per-fragment PBR microfacet)
+     Physically-based rendering using GGX/Trowbridge-Reitz NDF,
+     Schlick Fresnel, and Smith geometry term
+     ============================================================ -->
+<script id="vertex-shader-cooktorrance" type="x-shader/x-vertex">
+#version 300 es
+
+// Cook-Torrance vertex shader: same as Phong - pass vectors to fragment
+in vec4 aPosition;
+in vec4 aNormal;
+out vec3 N, L, E;
+
+uniform mat4 uModelViewMatrix;
+uniform mat4 uProjectionMatrix;
+uniform vec4 uLightPosition;
+uniform mat3 uNormalMatrix;
+
+void main()
+{
+    vec3 pos = (uModelViewMatrix * aPosition).xyz;
+
+    if(uLightPosition.w == 0.0) L = normalize(uLightPosition.xyz);
+    else L = normalize( uLightPosition.xyz - pos );
+
+    E = -normalize(pos);
+    N = normalize( uNormalMatrix * aNormal.xyz);
+
+    gl_Position = uProjectionMatrix * uModelViewMatrix * aPosition;
+}
+</script>
+
+<script id="fragment-shader-cooktorrance" type="x-shader/x-fragment">
+#version 300 es
+precision mediump float;
+
+// Cook-Torrance microfacet BRDF with:
+//   D = GGX (Trowbridge-Reitz) normal distribution
+//   F = Schlick approximation to Fresnel
+//   G = Smith geometry term (Schlick-GGX)
+
+uniform vec4 uAmbientProduct;
+uniform vec4 uDiffuseProduct;
+uniform vec4 uSpecularProduct;
+uniform float uShininess;  // we repurpose this: roughness = 1.0 / sqrt(uShininess)
+
+in vec3 N, L, E;
+out vec4 fColor;
+
+const float PI = 3.14159265359;
+
+// GGX / Trowbridge-Reitz Normal Distribution Function
+float distributionGGX(vec3 N, vec3 H, float roughness)
+{
+    float a  = roughness * roughness;
+    float a2 = a * a;
+    float NdotH  = max(dot(N, H), 0.0);
+    float NdotH2 = NdotH * NdotH;
+
+    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+    denom = PI * denom * denom;
+
+    return a2 / max(denom, 0.0001);
+}
+
+// Schlick-GGX Geometry Function (single direction)
+float geometrySchlickGGX(float NdotV, float roughness)
+{
+    float r = (roughness + 1.0);
+    float k = (r * r) / 8.0;
+
+    float denom = NdotV * (1.0 - k) + k;
+    return NdotV / max(denom, 0.0001);
+}
+
+// Smith Geometry Function (combines both view and light directions)
+float geometrySmith(vec3 N, vec3 V, vec3 L, float roughness)
+{
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = max(dot(N, L), 0.0);
+    float ggx2  = geometrySchlickGGX(NdotV, roughness);
+    float ggx1  = geometrySchlickGGX(NdotL, roughness);
+
+    return ggx1 * ggx2;
+}
+
+// Schlick Fresnel Approximation
+vec3 fresnelSchlick(float cosTheta, vec3 F0)
+{
+    return F0 + (1.0 - F0) * pow(max(1.0 - cosTheta, 0.0), 5.0);
+}
+
+void main()
+{
+    // Re-normalize interpolated vectors
+    vec3 NN = normalize(N);
+    vec3 LL = normalize(L);
+    vec3 VV = normalize(E);
+    vec3 H  = normalize(LL + VV);
+
+    // Derive roughness from the shininess uniform
+    // Higher shininess = lower roughness
+    float roughness = clamp(1.0 / sqrt(uShininess), 0.05, 1.0);
+
+    // Base reflectivity (F0) - use specular product color as approximation
+    vec3 F0 = uSpecularProduct.rgb * 0.5 + vec3(0.04);
+
+    // Ambient term
+    vec4 ambient = uAmbientProduct;
+
+    float NdotL = max(dot(NN, LL), 0.0);
+
+    if(NdotL > 0.0) {
+        // Cook-Torrance specular BRDF components
+        float D = distributionGGX(NN, H, roughness);
+        float G = geometrySmith(NN, VV, LL, roughness);
+        vec3  F = fresnelSchlick(max(dot(H, VV), 0.0), F0);
+
+        // Cook-Torrance specular term: DGF / (4 * NdotV * NdotL)
+        float NdotV = max(dot(NN, VV), 0.0);
+        vec3 numerator   = D * G * F;
+        float denominator = 4.0 * NdotV * NdotL;
+        vec3 specular    = numerator / max(denominator, 0.001);
+
+        // Diffuse: energy conservation - what is not reflected is diffused
+        vec3 kD = (1.0 - F);
+
+        // Final color
+        vec3 Lo = (kD * uDiffuseProduct.rgb / PI + specular) * NdotL;
+
+        fColor = ambient + vec4(Lo, 1.0);
+    } else {
+        fColor = ambient;
+    }
+
+    fColor.a = 1.0;
+}
+</script>
+
+
+<!-- ============================================================
+     JAVASCRIPT: MV Library (minimal), initShaders, Main App
+     ============================================================ -->
+<script>
+"use strict";
+
+// ---------------------------------------------------------------
+// Minimal MV Library - based on MVnew.js from Shreiner-Angel
+// Provides: vec3, vec4, mat4, mult, flatten, normalize, mix,
+//   cross, subtract, lookAt, ortho, normalMatrix, rotate, etc.
+// ---------------------------------------------------------------
+
+function vec3() {
+    var result = new Array(3);
+    switch (arguments.length) {
+        case 0: result[0] = 0.0; result[1] = 0.0; result[2] = 0.0; break;
+        case 1:
+            if (Array.isArray(arguments[0])) {
+                result[0] = arguments[0][0]; result[1] = arguments[0][1]; result[2] = arguments[0][2];
+            } else { result[0] = arguments[0]; result[1] = arguments[0]; result[2] = arguments[0]; }
+            break;
+        case 3: result[0] = arguments[0]; result[1] = arguments[1]; result[2] = arguments[2]; break;
+        default: throw "vec3: wrong arguments";
+    }
+    return result;
+}
+
+function vec4() {
+    var result = new Array(4);
+    switch (arguments.length) {
+        case 0: result[0] = 0.0; result[1] = 0.0; result[2] = 0.0; result[3] = 0.0; break;
+        case 1:
+            if (Array.isArray(arguments[0])) {
+                result[0] = arguments[0][0]; result[1] = arguments[0][1];
+                result[2] = arguments[0][2]; result[3] = arguments[0][3] !== undefined ? arguments[0][3] : 0.0;
+            } else { result[0]=result[1]=result[2]=result[3]=arguments[0]; }
+            break;
+        case 4: result[0]=arguments[0]; result[1]=arguments[1]; result[2]=arguments[2]; result[3]=arguments[3]; break;
+        default: throw "vec4: wrong arguments";
+    }
+    return result;
+}
+
+function mat4() {
+    var result = [];
+    for (var i = 0; i < 4; i++) {
+        result.push([0,0,0,0]);
+    }
+    // identity
+    for (var i = 0; i < 4; i++) result[i][i] = 1.0;
+    return result;
+}
+
+function flatten(v) {
+    if (!Array.isArray(v)) return v;
+    if (typeof(v[0]) == 'number') {
+        var floats = new Float32Array(v.length);
+        for (var i = 0; i < v.length; i++) floats[i] = v[i];
+        return floats;
+    }
+    var floats = new Float32Array(v.length * v[0].length);
+    for (var i = 0; i < v.length; i++)
+        for (var j = 0; j < v[0].length; j++)
+            floats[i * v[0].length + j] = v[i][j];
+    return floats;
+}
+
+function normalize(u, excludeLastComponent) {
+    if (excludeLastComponent) {
+        var last = u.pop();
+    }
+    var len = 0.0;
+    for (var i = 0; i < u.length; i++) len += u[i] * u[i];
+    len = Math.sqrt(len);
+    if (len < 1.0e-10) {
+        for (var i = 0; i < u.length; i++) u[i] = 0.0;
+    } else {
+        for (var i = 0; i < u.length; i++) u[i] /= len;
+    }
+    if (excludeLastComponent) u.push(last);
+    return u;
+}
+
+function mix(u, v, s) {
+    if (u.length != v.length) throw "mix: dimensions mismatch";
+    var result = [];
+    for (var i = 0; i < u.length; i++) result.push((1.0 - s) * u[i] + s * v[i]);
+    return result;
+}
+
+function cross(u, v) {
+    if (u.length < 3 || v.length < 3) throw "cross: need 3D vectors";
+    return [
+        u[1]*v[2] - u[2]*v[1],
+        u[2]*v[0] - u[0]*v[2],
+        u[0]*v[1] - u[1]*v[0]
+    ];
+}
+
+function subtract(u, v) {
+    var result = [];
+    for (var i = 0; i < u.length; i++) result.push(u[i] - v[i]);
+    return result;
+}
+
+function negate(u) {
+    var result = [];
+    for (var i = 0; i < u.length; i++) result.push(-u[i]);
+    return result;
+}
+
+function dot(u, v) {
+    var sum = 0.0;
+    for (var i = 0; i < u.length; i++) sum += u[i] * v[i];
+    return sum;
+}
+
+// Component-wise multiply for vec4 (light*material products)
+function mult(u, v) {
+    if (Array.isArray(u[0])) {
+        // matrix * matrix
+        var result = [];
+        for (var i = 0; i < u.length; i++) {
+            result.push([]);
+            for (var j = 0; j < v[0].length; j++) {
+                var sum = 0.0;
+                for (var k = 0; k < u[0].length; k++) sum += u[i][k] * v[k][j];
+                result[i].push(sum);
+            }
+        }
+        return result;
+    }
+    // vec * vec (component-wise)
+    var result = [];
+    for (var i = 0; i < u.length; i++) result.push(u[i] * v[i]);
+    return result;
+}
+
+function lookAt(eye, at, up) {
+    if (eye.length != 3 || at.length != 3 || up.length != 3) throw "lookAt: need vec3";
+
+    if (Math.abs(eye[0]-at[0]) < 1e-6 && Math.abs(eye[1]-at[1]) < 1e-6 && Math.abs(eye[2]-at[2]) < 1e-6) {
+        return mat4();
+    }
+
+    var v = normalize(subtract(at, eye), false);
+    var n = normalize(cross(v, up), false);
+    var u = normalize(cross(n, v), false);
+    v = negate(v);
+
+    var result = mat4();
+    result[0][0]=n[0]; result[0][1]=n[1]; result[0][2]=n[2]; result[0][3]=-dot(n,eye);
+    result[1][0]=u[0]; result[1][1]=u[1]; result[1][2]=u[2]; result[1][3]=-dot(u,eye);
+    result[2][0]=v[0]; result[2][1]=v[1]; result[2][2]=v[2]; result[2][3]=-dot(v,eye);
+    result[3][0]=0;    result[3][1]=0;    result[3][2]=0;    result[3][3]=1.0;
+
+    return result;
+}
+
+function ortho(left, right, bottom, top, near, far) {
+    if (left == right) throw "ortho: left == right";
+    if (bottom == top) throw "ortho: bottom == top";
+    if (near == far) throw "ortho: near == far";
+
+    var w = right - left;
+    var h = top - bottom;
+    var d = far - near;
+
+    var result = mat4();
+    result[0][0] = 2.0 / w;
+    result[1][1] = 2.0 / h;
+    result[2][2] = -2.0 / d;
+    result[0][3] = -(left + right) / w;
+    result[1][3] = -(top + bottom) / h;
+    result[2][3] = -(near + far) / d;
+    return result;
+}
+
+function rotate(angle, axis) {
+    // axis is vec3
+    var v = normalize([axis[0], axis[1], axis[2]], false);
+    var x = v[0], y = v[1], z = v[2];
+    var c = Math.cos(angle * Math.PI / 180.0);
+    var s = Math.sin(angle * Math.PI / 180.0);
+    var omc = 1.0 - c;
+
+    var result = mat4();
+    result[0][0] = x*x*omc + c;
+    result[0][1] = x*y*omc - z*s;
+    result[0][2] = x*z*omc + y*s;
+    result[1][0] = x*y*omc + z*s;
+    result[1][1] = y*y*omc + c;
+    result[1][2] = y*z*omc - x*s;
+    result[2][0] = x*z*omc - y*s;
+    result[2][1] = y*z*omc + x*s;
+    result[2][2] = z*z*omc + c;
+    return result;
+}
+
+function normalMatrix(m, flag) {
+    // Extract upper-left 3x3 from 4x4, then invert and transpose
+    var a = [
+        [m[0][0], m[0][1], m[0][2]],
+        [m[1][0], m[1][1], m[1][2]],
+        [m[2][0], m[2][1], m[2][2]]
+    ];
+
+    // Compute determinant of 3x3
+    var d = a[0][0]*a[1][1]*a[2][2] + a[0][1]*a[1][2]*a[2][0] + a[0][2]*a[1][0]*a[2][1]
+          - a[0][2]*a[1][1]*a[2][0] - a[0][1]*a[1][0]*a[2][2] - a[0][0]*a[1][2]*a[2][1];
+
+    if (Math.abs(d) < 1.0e-10) {
+        // singular - just return identity
+        return [[1,0,0],[0,1,0],[0,0,1]];
+    }
+
+    d = 1.0 / d;
+
+    // Inverse of 3x3
+    var inv = [
+        [ d*(a[1][1]*a[2][2]-a[1][2]*a[2][1]), d*(a[0][2]*a[2][1]-a[0][1]*a[2][2]), d*(a[0][1]*a[1][2]-a[0][2]*a[1][1]) ],
+        [ d*(a[1][2]*a[2][0]-a[1][0]*a[2][2]), d*(a[0][0]*a[2][2]-a[0][2]*a[2][0]), d*(a[0][2]*a[1][0]-a[0][0]*a[1][2]) ],
+        [ d*(a[1][0]*a[2][1]-a[1][1]*a[2][0]), d*(a[0][1]*a[2][0]-a[0][0]*a[2][1]), d*(a[0][0]*a[1][1]-a[0][1]*a[1][0]) ]
+    ];
+
+    if (flag) {
+        // Return transpose of inverse (for normal transformation)
+        return inv;
+    }
+    // Transpose
+    return [
+        [inv[0][0], inv[1][0], inv[2][0]],
+        [inv[0][1], inv[1][1], inv[2][1]],
+        [inv[0][2], inv[1][2], inv[2][2]]
+    ];
+}
+
+
+// ---------------------------------------------------------------
+// initShaders - from course code (initShaders.js)
+// ---------------------------------------------------------------
+function initShaders(gl, vertexShaderId, fragmentShaderId)
+{
+    var vertShdr;
+    var fragShdr;
+
+    var vertElem = document.getElementById(vertexShaderId);
+    if (!vertElem) {
+        alert("Unable to load vertex shader " + vertexShaderId);
+        return -1;
+    }
+    else {
+        vertShdr = gl.createShader(gl.VERTEX_SHADER);
+        gl.shaderSource(vertShdr, vertElem.textContent.replace(/^\s+|\s+$/g, ''));
+        gl.compileShader(vertShdr);
+        if (!gl.getShaderParameter(vertShdr, gl.COMPILE_STATUS)) {
+            var msg = "Vertex shader '" + vertexShaderId + "' failed to compile:\n"
+                + gl.getShaderInfoLog(vertShdr);
+            alert(msg);
+            return -1;
+        }
+    }
+
+    var fragElem = document.getElementById(fragmentShaderId);
+    if (!fragElem) {
+        alert("Unable to load fragment shader " + fragmentShaderId);
+        return -1;
+    }
+    else {
+        fragShdr = gl.createShader(gl.FRAGMENT_SHADER);
+        gl.shaderSource(fragShdr, fragElem.textContent.replace(/^\s+|\s+$/g, ''));
+        gl.compileShader(fragShdr);
+        if (!gl.getShaderParameter(fragShdr, gl.COMPILE_STATUS)) {
+            var msg = "Fragment shader '" + fragmentShaderId + "' failed to compile:\n"
+                + gl.getShaderInfoLog(fragShdr);
+            alert(msg);
+            return -1;
+        }
+    }
+
+    var program = gl.createProgram();
+    gl.attachShader(program, vertShdr);
+    gl.attachShader(program, fragShdr);
+    gl.linkProgram(program);
+
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        var msg = "Shader program failed to link:\n" + gl.getProgramInfoLog(program);
+        alert(msg);
+        return -1;
+    }
+
+    return program;
+}
+
+
+// ---------------------------------------------------------------
+// MAIN APPLICATION
+// ---------------------------------------------------------------
+
+var canvas;
+var gl;
+
+var numTimesToSubdivide = 4;
+var index = 0;
+var positionsArray = [];
+var normalsArray = [];
+
+// Camera parameters (same as course examples)
+var near = -10;
+var far = 10;
+var radius = 1.5;
+var theta = 0.0;
+var phi = 0.0;
+var dr = 5.0 * Math.PI / 180.0;
+
+var left = -3.0;
+var right = 3.0;
+var ytop = 3.0;
+var bottom = -3.0;
+
+// Tetrahedron vertices for sphere subdivision (from shadedSphere1.js)
+var va = vec4(0.0, 0.0, -1.0, 1);
+var vb = vec4(0.0, 0.942809, 0.333333, 1);
+var vc = vec4(-0.816497, -0.471405, 0.333333, 1);
+var vd = vec4(0.816497, -0.471405, 0.333333, 1);
+
+// Light properties (from course examples)
+var lightPosition = vec4(1.0, 1.0, 1.0, 0.0);
+var lightAmbient = vec4(0.2, 0.2, 0.2, 1.0);
+var lightDiffuse = vec4(1.0, 1.0, 1.0, 1.0);
+var lightSpecular = vec4(1.0, 1.0, 1.0, 1.0);
+
+// Material properties (from course examples)
+var materialAmbient = vec4(1.0, 0.0, 1.0, 1.0);
+var materialDiffuse = vec4(1.0, 0.8, 0.0, 1.0);
+var materialSpecular = vec4(1.0, 1.0, 1.0, 1.0);
+var materialShininess = 20.0;
+
+// View
+var eye;
+var at = vec3(0.0, 0.0, 0.0);
+var up = vec3(0.0, 1.0, 0.0);
+
+// GPU Program objects and VAOs (multiple program objects pattern from Ex_MultipleShadersVAO)
+var programGouraud, programPhong, programCookTorrance;
+var vaoGouraud, vaoPhong, vaoCookTorrance;
+var currentModel = "gouraud";
+
+// Uniform locations stored per-program
+var uniforms = {};
+
+// ---------------------------------------------------------------
+// Sphere subdivision (from shadedSphere1.js / shadedSphere2.js)
+// ---------------------------------------------------------------
+
+function triangle(a, b, c) {
+    positionsArray.push(a);
+    positionsArray.push(b);
+    positionsArray.push(c);
+
+    // normals are vectors (w = 0)
+    normalsArray.push(vec4(a[0], a[1], a[2], 0.0));
+    normalsArray.push(vec4(b[0], b[1], b[2], 0.0));
+    normalsArray.push(vec4(c[0], c[1], c[2], 0.0));
+
+    index += 3;
+}
+
+function divideTriangle(a, b, c, count) {
+    if (count > 0) {
+        var ab = mix(a, b, 0.5);
+        var ac = mix(a, c, 0.5);
+        var bc = mix(b, c, 0.5);
+
+        ab = normalize(ab, true);
+        ac = normalize(ac, true);
+        bc = normalize(bc, true);
+
+        divideTriangle(a, ab, ac, count - 1);
+        divideTriangle(ab, b, bc, count - 1);
+        divideTriangle(bc, c, ac, count - 1);
+        divideTriangle(ab, bc, ac, count - 1);
+    }
+    else {
+        triangle(a, b, c);
+    }
+}
+
+function tetrahedron(a, b, c, d, n) {
+    divideTriangle(a, b, c, n);
+    divideTriangle(d, c, b, n);
+    divideTriangle(a, d, b, n);
+    divideTriangle(a, c, d, n);
+}
+
+
+// ---------------------------------------------------------------
+// Setup a program with VAO (pattern from Ex_MultipleShadersVAO)
+// ---------------------------------------------------------------
+function setupProgram(program, posBuffer, normBuffer) {
+
+    var vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+
+    gl.useProgram(program);
+
+    // Bind normals buffer
+    gl.bindBuffer(gl.ARRAY_BUFFER, normBuffer);
+    var normalLoc = gl.getAttribLocation(program, "aNormal");
+    if (normalLoc >= 0) {
+        gl.vertexAttribPointer(normalLoc, 4, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(normalLoc);
+    }
+
+    // Bind positions buffer
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+    var positionLoc = gl.getAttribLocation(program, "aPosition");
+    if (positionLoc >= 0) {
+        gl.vertexAttribPointer(positionLoc, 4, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(positionLoc);
+    }
+
+    gl.bindVertexArray(null);
+    return vao;
+}
+
+
+// ---------------------------------------------------------------
+// Get and cache uniform locations for a program
+// ---------------------------------------------------------------
+function getUniforms(program, name) {
+    uniforms[name] = {
+        modelViewMatrix:  gl.getUniformLocation(program, "uModelViewMatrix"),
+        projectionMatrix: gl.getUniformLocation(program, "uProjectionMatrix"),
+        normalMatrix:     gl.getUniformLocation(program, "uNormalMatrix"),
+        ambientProduct:   gl.getUniformLocation(program, "uAmbientProduct"),
+        diffuseProduct:   gl.getUniformLocation(program, "uDiffuseProduct"),
+        specularProduct:  gl.getUniformLocation(program, "uSpecularProduct"),
+        lightPosition:    gl.getUniformLocation(program, "uLightPosition"),
+        shininess:        gl.getUniformLocation(program, "uShininess")
+    };
+}
+
+
+// ---------------------------------------------------------------
+// Upload material/light uniforms to a program
+// ---------------------------------------------------------------
+function uploadUniforms(program, name) {
+    gl.useProgram(program);
+
+    var ambientProduct = mult(lightAmbient, materialAmbient);
+    var diffuseProduct = mult(lightDiffuse, materialDiffuse);
+    var specularProduct = mult(lightSpecular, materialSpecular);
+
+    var u = uniforms[name];
+
+    if (u.ambientProduct)  gl.uniform4fv(u.ambientProduct, flatten(ambientProduct));
+    if (u.diffuseProduct)  gl.uniform4fv(u.diffuseProduct, flatten(diffuseProduct));
+    if (u.specularProduct) gl.uniform4fv(u.specularProduct, flatten(specularProduct));
+    if (u.lightPosition)   gl.uniform4fv(u.lightPosition, flatten(lightPosition));
+    if (u.shininess)       gl.uniform1f(u.shininess, materialShininess);
+}
+
+
+// ---------------------------------------------------------------
+// INIT
+// ---------------------------------------------------------------
+function init() {
+    canvas = document.getElementById("gl-canvas");
+
+    gl = canvas.getContext('webgl2');
+    if (!gl) alert("WebGL 2.0 isn't available");
+
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(1.0, 1.0, 1.0, 1.0);
+    gl.enable(gl.DEPTH_TEST);
+
+    // Generate sphere geometry
+    index = 0;
+    positionsArray = [];
+    normalsArray = [];
+    tetrahedron(va, vb, vc, vd, numTimesToSubdivide);
+
+    // Upload geometry to GPU buffers (shared across all programs)
+    var nBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, nBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, flatten(normalsArray), gl.STATIC_DRAW);
+
+    var vBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, flatten(positionsArray), gl.STATIC_DRAW);
+
+    // ---- Create THREE separate GPU program objects ----
+    // (as required by assignment: "Use multiple GPU program objects")
+
+    programGouraud = initShaders(gl, "vertex-shader-gouraud", "fragment-shader-gouraud");
+    programPhong = initShaders(gl, "vertex-shader-phong", "fragment-shader-phong");
+    programCookTorrance = initShaders(gl, "vertex-shader-cooktorrance", "fragment-shader-cooktorrance");
+
+    // ---- Create VAOs for each program (pattern from Ex_MultipleShadersVAO) ----
+
+    vaoGouraud = setupProgram(programGouraud, vBuffer, nBuffer);
+    vaoPhong = setupProgram(programPhong, vBuffer, nBuffer);
+    vaoCookTorrance = setupProgram(programCookTorrance, vBuffer, nBuffer);
+
+    // ---- Cache uniform locations ----
+
+    getUniforms(programGouraud, "gouraud");
+    getUniforms(programPhong, "phong");
+    getUniforms(programCookTorrance, "cooktorrance");
+
+    // ---- Upload material/light uniforms to all three programs ----
+
+    uploadUniforms(programGouraud, "gouraud");
+    uploadUniforms(programPhong, "phong");
+    uploadUniforms(programCookTorrance, "cooktorrance");
+
+    // ---- UI Event handlers (same pattern as shadedSphere1.js) ----
+
+    document.getElementById("Button0").onclick = function(){ radius *= 2.0; };
+    document.getElementById("Button1").onclick = function(){ radius *= 0.5; };
+    document.getElementById("Button2").onclick = function(){ theta += dr; };
+    document.getElementById("Button3").onclick = function(){ theta -= dr; };
+    document.getElementById("Button4").onclick = function(){ phi += dr; };
+    document.getElementById("Button5").onclick = function(){ phi -= dr; };
+
+    document.getElementById("Button6").onclick = function(){
+        numTimesToSubdivide++;
+        init();
+        updateInfo();
+    };
+    document.getElementById("Button7").onclick = function(){
+        if (numTimesToSubdivide) numTimesToSubdivide--;
+        init();
+        updateInfo();
+    };
+
+    // Dropdown to switch shading model
+    document.getElementById("shading-select").onchange = function() {
+        currentModel = this.value;
+        updateInfo();
+    };
+
+    render();
+}
+
+function updateInfo() {
+    var names = {
+        "gouraud": "Gouraud (Per-Vertex)",
+        "phong": "Phong (Per-Fragment)",
+        "cooktorrance": "Cook-Torrance (PBR)"
+    };
+    document.getElementById("info-text").textContent =
+        "Current: " + names[currentModel] + " \u2022 Subdivisions: " + numTimesToSubdivide;
+}
+
+
+// ---------------------------------------------------------------
+// RENDER LOOP
+// ---------------------------------------------------------------
+function render() {
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    // Compute camera (same as shadedSphere1.js / shadedSphere2.js)
+    eye = vec3(
+        radius * Math.sin(theta) * Math.cos(phi),
+        radius * Math.sin(theta) * Math.sin(phi),
+        radius * Math.cos(theta)
+    );
+
+    var modelViewMatrix = lookAt(eye, at, up);
+    var projectionMatrix = ortho(left, right, bottom, ytop, near, far);
+    var nMatrix = normalMatrix(modelViewMatrix, true);
+
+    // Select active program and VAO based on dropdown choice
+    var activeProgram, activeVAO, activeName;
+
+    if (currentModel === "gouraud") {
+        activeProgram = programGouraud;
+        activeVAO = vaoGouraud;
+        activeName = "gouraud";
+    } else if (currentModel === "phong") {
+        activeProgram = programPhong;
+        activeVAO = vaoPhong;
+        activeName = "phong";
+    } else {
+        activeProgram = programCookTorrance;
+        activeVAO = vaoCookTorrance;
+        activeName = "cooktorrance";
+    }
+
+    // Switch GPU program and bind VAO (like Ex_MultipleShadersVAO)
+    gl.useProgram(activeProgram);
+    gl.bindVertexArray(activeVAO);
+
+    // Upload per-frame uniforms (matrices)
+    var u = uniforms[activeName];
+    // flatten() above writes matrices row by row, but GLSL expects column-major,
+    // so the transpose flag is set to true for these two uploads (allowed in WebGL 2).
+    // The normal matrix stays false: uploading the row-major inverse gives the
+    // inverse-transpose the shaders need.
+    gl.uniformMatrix4fv(u.modelViewMatrix, true, flatten(modelViewMatrix));
+    gl.uniformMatrix4fv(u.projectionMatrix, true, flatten(projectionMatrix));
+    if (u.normalMatrix) gl.uniformMatrix3fv(u.normalMatrix, false, flatten(nMatrix));
+
+    // Draw all triangles
+    for (var i = 0; i < index; i += 3) {
+        gl.drawArrays(gl.TRIANGLES, i, 3);
+    }
+
+    requestAnimationFrame(render);
+}
+
+
+// Start
+init();
+
+</script>
+
+</body>
+</html>
